@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Converter App - PDF, Word, Excel, PowerPoint & Images</title>
+    <link rel="stylesheet" href="/static/style.css?v=10">
+    <!-- PDF.js untuk preview halaman pertama -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Converter App</h1>
+        <p class="subtitle">Convert dokumen dan gambar Anda dengan mudah</p>
+
+        <div class="converter-box">
+            <!-- Level 1: Kategori -->
+            <div class="category-container">
+                <button class="category-tab active" data-category="convert" onclick="switchCategory('convert')">Convert</button>
+                <button class="category-tab" data-category="organize" onclick="switchCategory('organize')">Edit & Organize</button>
+                <button class="category-tab" data-category="clean" onclick="switchCategory('clean')">Bersihkan & Scan</button>
+            </div>
+
+            <!-- Level 2: Alat di dalam kategori -->
+            <div class="tool-group" data-category="convert">
+                <button class="tool-tab active" onclick="switchTab('pdf-to-word')">PDF → Word</button>
+                <button class="tool-tab" onclick="switchTab('word-to-pdf')">Word → PDF</button>
+                <button class="tool-tab" onclick="switchTab('image-to-pdf')">Image → PDF</button>
+                <button class="tool-tab" onclick="switchTab('ppt-to-pdf')">PowerPoint → PDF</button>
+                <button class="tool-tab" onclick="switchTab('pdf-to-ppt')">PDF → PowerPoint</button>
+                <button class="tool-tab" onclick="switchTab('excel-to-pdf')">Excel → PDF</button>
+                <button class="tool-tab" onclick="switchTab('pdf-to-excel')">PDF → Excel</button>
+            </div>
+            <div class="tool-group" data-category="organize" style="display: none;">
+                <button class="tool-tab" onclick="switchTab('merge-pdf')">Merge PDF</button>
+                <button class="tool-tab" onclick="switchTab('split-pdf')">Split PDF</button>
+                <button class="tool-tab" onclick="switchTab('compress-pdf')">Compress PDF</button>
+            </div>
+            <div class="tool-group" data-category="clean" style="display: none;">
+                <button class="tool-tab" onclick="switchTab('remove-watermark')">Remove Watermark</button>
+                <button class="tool-tab" onclick="switchTab('scan-document')">Scan Dokumen</button>
+            </div>
+
+            <!-- Single file: PDF<->Word, PPT->PDF, PDF->PPT, Excel->PDF, PDF->Excel -->
+            <div id="singleFileUpload" class="upload-area">
+                <div class="upload-content">
+                    <svg class="upload-icon" viewBox="0 0 24 24" width="64" height="64">
+                        <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                    </svg>
+                    <p class="upload-text">Drag & drop file di sini</p>
+                    <p class="upload-hint">atau</p>
+                    <label for="singleFileInput" class="browse-btn">Pilih File</label>
+                    <input type="file" id="singleFileInput" hidden>
+                    <p class="file-info" id="singleFileInfo"></p>
+
+                    <!-- Opsi Metode untuk PDF ke Word -->
+                    <div class="pdf-convert-options" id="pdfConvertOptions" style="display: none;">
+                        <div class="convert-method-select">
+                            <label>Metode Konversi:</label>
+                            <select id="convertMethod">
+                                <option value="auto" selected>Auto (Rekomendasi)</option>
+                                <option value="ms_word">Microsoft Word (Paling Akurat)</option>
+                                <option value="pdf2docx">pdf2docx (Cepat)</option>
+                                <option value="ocr">OCR (Untuk PDF Scan)</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Image to PDF -->
+            <div id="imageToPdfContainer" style="display: none;">
+                <div id="multipleFileUpload" class="upload-area">
+                    <div class="upload-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" width="48" height="48">
+                            <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                        </svg>
+                        <p class="upload-text">Tambah Gambar</p>
+                        <p class="upload-hint">JPG, JPEG, PNG (bisa pilih banyak)</p>
+                        <label for="multipleFileInput" class="browse-btn">Pilih Gambar</label>
+                        <input type="file" id="multipleFileInput" hidden multiple accept=".jpg,.jpeg,.png">
+                    </div>
+                </div>
+
+                <div id="imagePreviewContainer" style="display: none;">
+                    <div class="preview-header">
+                        <h3><span id="imageCount">0</span> Gambar</h3>
+                        <p class="preview-hint">Drag & drop untuk mengatur urutan</p>
+                        <button class="clear-all-btn" onclick="clearAllImages()">Hapus Semua</button>
+                    </div>
+                    <div id="imageGrid" class="image-grid"></div>
+                    <div class="pdf-options">
+                        <div class="option-group">
+                            <label>Ukuran Halaman:</label>
+                            <select id="pageSize">
+                                <option value="A4">A4</option>
+                                <option value="Letter">Letter</option>
+                                <option value="Legal">Legal</option>
+                                <option value="original">Original</option>
+                            </select>
+                        </div>
+                        <div class="option-group">
+                            <label>Mode Fit:</label>
+                            <select id="fitMode">
+                                <option value="inside">Inside</option>
+                                <option value="fill">Fill</option>
+                                <option value="stretch">Stretch</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Compress PDF -->
+            <div id="compressPdfContainer" style="display: none;">
+                <div id="compressUpload" class="upload-area">
+                    <div class="upload-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" width="64" height="64">
+                            <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                        </svg>
+                        <p class="upload-text">Upload PDF untuk dikompres</p>
+                        <p class="upload-hint">Maksimal 50MB</p>
+                        <label for="compressFileInput" class="browse-btn">Pilih PDF</label>
+                        <input type="file" id="compressFileInput" hidden accept=".pdf">
+                        <p class="file-info" id="compressFileInfo"></p>
+                    </div>
+                </div>
+
+                <div id="compressOptions" style="display: none;">
+                    <div class="compress-options-container">
+                        <h3>Opsi Kompresi</h3>
+                        <div class="compress-levels">
+                            <label class="compress-level-card" id="levelLow" data-level="low">
+                                <input type="radio" name="compression" value="low" hidden>
+                                <div class="level-bars" aria-hidden="true">
+                                    <span></span><span></span><span></span><span></span>
+                                </div>
+                                <div class="level-name">Low</div>
+                                <div class="level-desc">Kualitas terbaik</div>
+                            </label>
+                            <label class="compress-level-card active" id="levelMedium" data-level="medium">
+                                <input type="radio" name="compression" value="medium" hidden checked>
+                                <div class="level-bars" aria-hidden="true">
+                                    <span></span><span></span><span></span><span></span>
+                                </div>
+                                <div class="level-name">Medium</div>
+                                <div class="level-desc">Seimbang</div>
+                            </label>
+                            <label class="compress-level-card" id="levelHigh" data-level="high">
+                                <input type="radio" name="compression" value="high" hidden>
+                                <div class="level-bars" aria-hidden="true">
+                                    <span></span><span></span><span></span><span></span>
+                                </div>
+                                <div class="level-name">High</div>
+                                <div class="level-desc">Ukuran kecil</div>
+                            </label>
+                            <label class="compress-level-card" id="levelExtreme" data-level="extreme">
+                                <input type="radio" name="compression" value="extreme" hidden>
+                                <div class="level-bars" aria-hidden="true">
+                                    <span></span><span></span><span></span><span></span>
+                                </div>
+                                <div class="level-name">Extreme</div>
+                                <div class="level-desc">Minimum</div>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="compressResult" style="display: none;">
+                    <div class="compress-result-box">
+                        <h3>Kompresi Berhasil</h3>
+                        <div class="result-stats">
+                            <div class="stat-item">
+                                <span class="stat-label">Ukuran Awal</span>
+                                <span class="stat-value" id="originalSize">-</span>
+                            </div>
+                            <div class="stat-arrow">→</div>
+                            <div class="stat-item">
+                                <span class="stat-label">Ukuran Akhir</span>
+                                <span class="stat-value highlight" id="compressedSize">-</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Penghematan</span>
+                                <span class="stat-value saved" id="savedSize">-</span>
+                            </div>
+                        </div>
+                        <button class="download-compressed-btn" id="downloadCompressedBtn">Download PDF Terkompresi</button>
+                        <button class="compress-again-btn" onclick="resetCompress()">Kompres Lagi</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Merge PDF -->
+            <div id="mergePdfContainer" style="display: none;">
+                <div class="merge-mode-tabs">
+                    <button class="merge-mode-tab active" onclick="switchMergeMode('images')">Gabungkan Gambar</button>
+                    <button class="merge-mode-tab" onclick="switchMergeMode('pdfs')">Gabungkan PDF</button>
+                </div>
+
+                <!-- Mode Images -->
+                <div id="mergeImagesMode">
+                    <div id="mergeImagesUpload" class="upload-area">
+                        <div class="upload-content">
+                            <svg class="upload-icon" viewBox="0 0 24 24" width="48" height="48">
+                                <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                            </svg>
+                            <p class="upload-text">Tambah Gambar</p>
+                            <p class="upload-hint">JPG, JPEG, PNG (bisa pilih banyak)</p>
+                            <label for="mergeImagesInput" class="browse-btn">Pilih Gambar</label>
+                            <input type="file" id="mergeImagesInput" hidden multiple accept=".jpg,.jpeg,.png">
+                        </div>
+                    </div>
+
+                    <div id="mergeImagesPreview" style="display: none;">
+                        <div class="preview-header">
+                            <h3><span id="mergeImageCount">0</span> Gambar</h3>
+                            <p class="preview-hint">Drag & drop untuk mengatur urutan</p>
+                            <button class="clear-all-btn" onclick="clearMergeImages()">Hapus Semua</button>
+                        </div>
+                        <div id="mergeImageGrid" class="image-grid"></div>
+                        <div class="pdf-options">
+                            <div class="option-group">
+                                <label>Ukuran Halaman:</label>
+                                <select id="mergePageSize">
+                                    <option value="A4">A4</option>
+                                    <option value="Letter">Letter</option>
+                                    <option value="Legal">Legal</option>
+                                    <option value="original">Original</option>
+                                </select>
+                            </div>
+                            <div class="option-group">
+                                <label>Mode Fit:</label>
+                                <select id="mergeFitMode">
+                                    <option value="inside">Inside</option>
+                                    <option value="fill">Fill</option>
+                                    <option value="stretch">Stretch</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Mode PDFs -->
+                <div id="mergePdfsMode" style="display: none;">
+                    <div id="mergePdfsUpload" class="upload-area">
+                        <div class="upload-content">
+                            <svg class="upload-icon" viewBox="0 0 24 24" width="48" height="48">
+                                <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                            </svg>
+                            <p class="upload-text">Tambah File PDF</p>
+                            <p class="upload-hint">Bisa pilih banyak file PDF</p>
+                            <label for="mergePdfsInput" class="browse-btn">Pilih PDF</label>
+                            <input type="file" id="mergePdfsInput" hidden multiple accept=".pdf">
+                        </div>
+                    </div>
+
+                    <div id="mergePdfsPreview" style="display: none;">
+                        <div class="preview-header">
+                            <h3><span id="mergePdfCount">0</span> File PDF</h3>
+                            <p class="preview-hint">Drag & drop untuk mengatur urutan</p>
+                            <button class="clear-all-btn" onclick="clearMergePdfs()">Hapus Semua</button>
+                        </div>
+                        <div id="mergePdfGrid" class="merge-pdf-grid"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Split PDF -->
+            <div id="splitPdfContainer" style="display: none;">
+                <div id="splitUpload" class="upload-area">
+                    <div class="upload-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" width="64" height="64">
+                            <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                        </svg>
+                        <p class="upload-text">Upload PDF untuk displit</p>
+                        <p class="upload-hint">Maksimal 50MB</p>
+                        <label for="splitFileInput" class="browse-btn">Pilih PDF</label>
+                        <input type="file" id="splitFileInput" hidden accept=".pdf">
+                        <p class="file-info" id="splitFileInfo"></p>
+                    </div>
+                </div>
+
+                <div id="splitOptions" style="display: none;">
+                    <div class="merge-mode-tabs">
+                        <button class="merge-mode-tab active" onclick="switchSplitMode('range')">Berdasarkan Range</button>
+                        <button class="merge-mode-tab" onclick="switchSplitMode('every')">Tiap N Halaman</button>
+                    </div>
+
+                    <div id="splitRangeMode" class="watermark-options-container">
+                        <h3>Range Halaman</h3>
+                        <input type="text" id="splitRangeInput" class="watermark-select" placeholder="Contoh: 1-3,5,7-9">
+                        <p class="preview-hint" style="margin-top: 0.75rem;">Pisahkan tiap range/nomor dengan koma. Setiap bagian jadi satu file PDF terpisah.</p>
+                    </div>
+
+                    <div id="splitEveryMode" class="watermark-options-container" style="display: none;">
+                        <h3>Jumlah Halaman per File</h3>
+                        <input type="number" id="splitEveryInput" class="watermark-select split-number-input" min="1" value="1">
+                    </div>
+                </div>
+            </div>
+
+            <div id="removeWatermarkContainer" style="display: none;">
+                <div id="watermarkUpload" class="upload-area">
+                    <div class="upload-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" width="64" height="64">
+                            <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                        </svg>
+                        <p class="upload-text">Upload file untuk hapus watermark</p>
+                        <p class="upload-hint">PDF, JPG, PNG, JPEG</p>
+                        <label for="watermarkFileInput" class="browse-btn">Pilih File</label>
+                        <input type="file" id="watermarkFileInput" hidden accept=".pdf,.jpg,.jpeg,.png">
+                        <p class="file-info" id="watermarkFileInfo"></p>
+                    </div>
+                </div>
+
+                <div id="watermarkOptions" style="display: none;">
+                    <div class="watermark-options-container">
+                        <h3>Mode Pembersihan</h3>
+                        <select id="watermarkMode" class="watermark-select">
+                            <option value="auto">Auto (CamScanner)</option>
+                            <option value="camscanner">CamScanner Mode</option>
+                            <option value="bottom">Hapus Bawah</option>
+                            <option value="top">Hapus Atas</option>
+                            <option value="corners">Hapus Semua Pojok</option>
+                            <option value="border">Hapus Border</option>
+                            <option value="inpaint">Inpainting (AI Fill)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scan Document Container -->
+            <div id="scanContainer" style="display: none;">
+                <div id="scanUpload" class="upload-area">
+                    <div class="upload-content">
+                        <svg class="upload-icon" viewBox="0 0 24 24" width="64" height="64">
+                            <path fill="currentColor" d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/>
+                        </svg>
+                        <p class="upload-text">Upload Gambar untuk Scan</p>
+                        <p class="upload-hint">JPG, PNG, JPEG</p>
+                        <label for="scanFileInput" class="browse-btn">Pilih Gambar</label>
+                        <input type="file" id="scanFileInput" hidden accept=".jpg,.jpeg,.png">
+                    </div>
+                </div>
+
+                <!-- Preview & Crop Area -->
+                <div id="scanPreviewContainer" style="display: none;">
+                    <div class="scan-preview-box">
+                        <h3>Preview & Atur Crop</h3>
+                        <div class="scan-canvas-container">
+                            <div id="scanImageWrapper" style="position: relative; display: inline-block; max-width: 100%;">
+                                <img id="scanPreviewImage" class="scan-preview-image">
+
+                                <div id="scanCropOverlay" class="scan-crop-overlay">
+                                    <div class="crop-handle crop-handle-tl" data-handle="tl"></div>
+                                    <div class="crop-handle crop-handle-tr" data-handle="tr"></div>
+                                    <div class="crop-handle crop-handle-bl" data-handle="bl"></div>
+                                    <div class="crop-handle crop-handle-br" data-handle="br"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="scan-controls">
+                            <button class="scan-btn auto-detect-btn" onclick="autoDetectCrop()">Deteksi Otomatis</button>
+                            <button class="scan-btn reset-btn" onclick="resetCrop()">Atur Ulang</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <button class="convert-btn" id="convertBtn" disabled>
+                <span id="btnText">Convert Sekarang</span>
+                <div class="spinner" id="spinner" style="display: none;"></div>
+            </button>
+
+            <div class="status" id="status"></div>
+        </div>
+
+        <div class="features">
+            <div class="feature-card">
+                <h3>Cepat</h3>
+                <p>Konversi dalam hitungan detik</p>
+            </div>
+            <div class="feature-card">
+                <h3>Aman</h3>
+                <p>File dihapus otomatis</p>
+            </div>
+            <div class="feature-card">
+                <h3>Multi-Format</h3>
+                <p>PDF, Word, Excel, PowerPoint, JPG, PNG</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Konfirmasi -->
+    <div id="confirmModal" class="modal-overlay">
+        <div class="modal-box">
+            <div class="modal-header">
+                <h3 id="modalTitle">Konfirmasi</h3>
+            </div>
+            <div class="modal-body">
+                <p id="modalMessage">Apakah Anda yakin?</p>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-btn modal-btn-cancel" onclick="closeModal()">Batal</button>
+                <button class="modal-btn modal-btn-confirm" id="modalConfirmBtn" onclick="confirmModalAction()">Hapus</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast-notification" style="display: none;">
+        <span class="toast-label" id="toastLabel"></span>
+        <span id="toastMessage"></span>
+    </div>
+
+    <script src="/static/script.js?v=10"></script>
+</body>
+</html>

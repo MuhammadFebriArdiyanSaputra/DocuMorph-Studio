@@ -346,7 +346,18 @@ h1 { color: #1e1e2f; text-align: center; margin-bottom: 0.4rem; font-size: 2.25r
     border-top: 1px solid #eee;
 }
 .image-name { font-size: 0.75rem; color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100px; }
-.action-buttons { display: flex; gap: 0.35rem; justify-content: center; }
+.action-buttons { display: flex; gap: 0.35rem; justify-content: center; flex-wrap: wrap; }
+.merge-pdf-actions { display: flex; gap: 0.35rem; justify-content: center; margin-top: 0.5rem; }
+
+/* Tombol reorder alternatif untuk drag & drop - drag HTML5 tidak terpicu
+   oleh sentuhan, jadi tombol ini hanya ditampilkan di perangkat layar
+   sentuh (mouse/trackpad tetap pakai drag & drop seperti biasa) */
+.move-btn { display: none; }
+@media (pointer: coarse) {
+    .move-btn { display: inline-block; }
+}
+.action-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.action-btn:disabled:hover { background: none; color: #888; border-color: #e2e4ee; }
 
 .action-btn {
     background: none;
@@ -704,6 +715,7 @@ h1 { color: #1e1e2f; text-align: center; margin-bottom: 0.4rem; font-size: 2.25r
     cursor: move;
     pointer-events: all;
     box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+    touch-action: none; /* cegah browser ikut scroll halaman saat crop box digeser di HP */
 }
 
 /* Corner handles */
@@ -712,6 +724,7 @@ h1 { color: #1e1e2f; text-align: center; margin-bottom: 0.4rem; font-size: 2.25r
     width: 20px;
     height: 20px;
     background: #667eea;
+    touch-action: none;
     border: 2px solid white;
     border-radius: 50%;
     cursor: nwse-resize;
@@ -778,4 +791,37 @@ h1 { color: #1e1e2f; text-align: center; margin-bottom: 0.4rem; font-size: 2.25r
     .modal-box { border-radius: 16px; }
     .modal-footer { flex-direction: column; }
     .modal-btn { width: 100%; }
+
+    /* Cegah iOS Safari auto-zoom saat input/select difokus (butuh font-size >= 16px) */
+    input, select, textarea { font-size: 16px !important; }
+}
+
+/* Area tap diperbesar khusus untuk perangkat layar sentuh (HP/tablet),
+   berlaku di semua lebar layar - bukan hanya viewport sempit */
+@media (pointer: coarse) {
+    .action-btn {
+        padding: 0.55rem 0.85rem;
+        font-size: 0.78rem;
+        min-height: 38px;
+    }
+    .merge-pdf-delete {
+        opacity: 1; /* di HP tidak ada hover, jadi selalu tampil */
+        padding: 0.35rem 0.8rem;
+        font-size: 0.75rem;
+    }
+    .clear-all-btn, .scan-btn, .compress-again-btn {
+        padding: 0.75rem 1.4rem;
+    }
+    .rotate-btn, .delete-btn, .move-btn {
+        min-width: 44px;
+    }
+    .crop-handle {
+        width: 30px;
+        height: 30px;
+        top: -15px;
+    }
+    .crop-handle-tl { top: -15px; left: -15px; }
+    .crop-handle-tr { top: -15px; right: -15px; }
+    .crop-handle-bl { bottom: -15px; left: -15px; }
+    .crop-handle-br { bottom: -15px; right: -15px; }
 }

@@ -61,6 +61,38 @@ function switchCategory(cat) {
     switchTab(CATEGORY_TOOLS[cat][0]);
 }
 
+// Elemen area upload yang relevan untuk tiap mode - dipakai untuk auto-scroll di mobile
+function getActiveUploadAreaId(mode) {
+    const map = {
+        'pdf-to-word': 'singleFileUpload',
+        'word-to-pdf': 'singleFileUpload',
+        'ppt-to-pdf': 'singleFileUpload',
+        'pdf-to-ppt': 'singleFileUpload',
+        'excel-to-pdf': 'singleFileUpload',
+        'pdf-to-excel': 'singleFileUpload',
+        'image-to-pdf': 'multipleFileUpload',
+        'compress-pdf': 'compressUpload',
+        'split-pdf': 'splitUpload',
+        'remove-watermark': 'watermarkUpload',
+        'scan-document': 'scanUpload'
+    };
+    if (mode === 'merge-pdf') {
+        return mergeMode === 'images' ? 'mergeImagesUpload' : 'mergePdfsUpload';
+    }
+    return map[mode];
+}
+
+// Auto-scroll ke area drag & drop - hanya di layar sempit (mobile), supaya
+// desktop (yang biasanya seluruh box sudah kelihatan) tidak ikut lompat
+function scrollToActiveUploadArea(mode) {
+    if (window.innerWidth > 768) return;
+    const targetId = getActiveUploadAreaId(mode);
+    const el = targetId && document.getElementById(targetId);
+    if (el) {
+        requestAnimationFrame(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
+}
+
 // ==========================================
 // MODAL SYSTEM
 // ==========================================
@@ -193,6 +225,7 @@ function switchTab(mode) {
         document.getElementById('singleFileInput').accept = SINGLE_FILE_ACCEPT[mode];
     }
     renderImageGrid();
+    scrollToActiveUploadArea(mode);
 }
 
 // ==========================================
@@ -473,70 +506,97 @@ function updateCropOverlay() {
     overlay.style.height = scanBoundary.height + 'px';
 }
 
+// Crop overlay drag & resize - mendukung mouse (desktop) DAN touch (mobile).
+// Event mouse dan touch ditangani lewat fungsi bersama supaya perilakunya identik.
+function getPointFromEvent(e) {
+    if (e.touches && e.touches.length > 0) {
+        return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    }
+    return { x: e.clientX, y: e.clientY };
+}
+
+function handleCropDragStart(e) {
+    if (e.target.classList.contains('crop-handle')) return;
+    const pt = getPointFromEvent(e);
+    isDragging = true;
+    dragStartX = pt.x;
+    dragStartY = pt.y;
+    cropStartX = scanBoundary.x;
+    cropStartY = scanBoundary.y;
+    if (e.cancelable) e.preventDefault();
+}
+
+function handleCropResizeStart(handleName, e) {
+    e.stopPropagation();
+    const pt = getPointFromEvent(e);
+    isResizing = true;
+    activeHandle = handleName;
+    dragStartX = pt.x;
+    dragStartY = pt.y;
+    cropStartX = scanBoundary.x;
+    cropStartY = scanBoundary.y;
+    cropStartW = scanBoundary.width;
+    cropStartH = scanBoundary.height;
+    if (e.cancelable) e.preventDefault();
+}
+
+function handleCropMove(e) {
+    if (!isDragging && !isResizing) return;
+    const pt = getPointFromEvent(e);
+
+    if (isDragging) {
+        const dx = pt.x - dragStartX;
+        const dy = pt.y - dragStartY;
+        scanBoundary.x = Math.max(0, cropStartX + dx);
+        scanBoundary.y = Math.max(0, cropStartY + dy);
+        updateCropOverlay();
+    } else if (isResizing) {
+        const dx = pt.x - dragStartX;
+        const dy = pt.y - dragStartY;
+
+        if (activeHandle.includes('r')) {
+            scanBoundary.width = Math.max(30, cropStartW + dx);
+        }
+        if (activeHandle.includes('b')) {
+            scanBoundary.height = Math.max(30, cropStartH + dy);
+        }
+        if (activeHandle.includes('l')) {
+            scanBoundary.x = cropStartX + dx;
+            scanBoundary.width = Math.max(30, cropStartW - dx);
+        }
+        if (activeHandle.includes('t')) {
+            scanBoundary.y = cropStartY + dy;
+            scanBoundary.height = Math.max(30, cropStartH - dy);
+        }
+        updateCropOverlay();
+    }
+
+    if (e.cancelable) e.preventDefault();
+}
+
+function handleCropEnd() {
+    isDragging = false;
+    isResizing = false;
+    activeHandle = null;
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     const overlay = document.getElementById('scanCropOverlay');
 
     if (overlay) {
-        overlay.addEventListener('mousedown', (e) => {
-            if (e.target.classList.contains('crop-handle')) return;
-            isDragging = true;
-            dragStartX = e.clientX;
-            dragStartY = e.clientY;
-            cropStartX = scanBoundary.x;
-            cropStartY = scanBoundary.y;
-            e.preventDefault();
-        });
+        overlay.addEventListener('mousedown', handleCropDragStart);
+        overlay.addEventListener('touchstart', handleCropDragStart, { passive: false });
 
         document.querySelectorAll('.crop-handle').forEach(handle => {
-            handle.addEventListener('mousedown', (e) => {
-                e.stopPropagation();
-                isResizing = true;
-                activeHandle = handle.dataset.handle;
-                dragStartX = e.clientX;
-                dragStartY = e.clientY;
-                cropStartX = scanBoundary.x;
-                cropStartY = scanBoundary.y;
-                cropStartW = scanBoundary.width;
-                cropStartH = scanBoundary.height;
-                e.preventDefault();
-            });
+            handle.addEventListener('mousedown', (e) => handleCropResizeStart(handle.dataset.handle, e));
+            handle.addEventListener('touchstart', (e) => handleCropResizeStart(handle.dataset.handle, e), { passive: false });
         });
     }
 
-    document.addEventListener('mousemove', (e) => {
-        if (isDragging) {
-            const dx = e.clientX - dragStartX;
-            const dy = e.clientY - dragStartY;
-            scanBoundary.x = Math.max(0, cropStartX + dx);
-            scanBoundary.y = Math.max(0, cropStartY + dy);
-            updateCropOverlay();
-        } else if (isResizing) {
-            const dx = e.clientX - dragStartX;
-            const dy = e.clientY - dragStartY;
-
-            if (activeHandle.includes('r')) {
-                scanBoundary.width = Math.max(30, cropStartW + dx);
-            }
-            if (activeHandle.includes('b')) {
-                scanBoundary.height = Math.max(30, cropStartH + dy);
-            }
-            if (activeHandle.includes('l')) {
-                scanBoundary.x = cropStartX + dx;
-                scanBoundary.width = Math.max(30, cropStartW - dx);
-            }
-            if (activeHandle.includes('t')) {
-                scanBoundary.y = cropStartY + dy;
-                scanBoundary.height = Math.max(30, cropStartH - dy);
-            }
-            updateCropOverlay();
-        }
-    });
-
-    document.addEventListener('mouseup', () => {
-        isDragging = false;
-        isResizing = false;
-        activeHandle = null;
-    });
+    document.addEventListener('mousemove', handleCropMove);
+    document.addEventListener('touchmove', handleCropMove, { passive: false });
+    document.addEventListener('mouseup', handleCropEnd);
+    document.addEventListener('touchend', handleCropEnd);
 });
 
 // ==========================================
@@ -576,6 +636,16 @@ function clearAllImages() {
 }
 
 function rotateImage(index) { imageFiles[index].rotation = (imageFiles[index].rotation + 90) % 360; updatePreview(); }
+
+// Alternatif reorder selain drag & drop - drag HTML5 tidak terpicu oleh
+// sentuhan di layar mobile, jadi tombol ini jadi satu-satunya cara reorder
+// yang bisa dipakai di HP (ditampilkan otomatis lewat CSS @media pointer:coarse)
+function moveImage(index, direction) {
+    const target = index + direction;
+    if (target < 0 || target >= imageFiles.length) return;
+    [imageFiles[index], imageFiles[target]] = [imageFiles[target], imageFiles[index]];
+    updatePreview();
+}
 
 function updatePreview() {
     const container = document.getElementById('imagePreviewContainer');
@@ -637,6 +707,8 @@ function renderImageGrid() {
             <div class="image-actions">
                 <span class="image-name">${imgData.file.name}</span>
                 <div class="action-buttons">
+                    <button class="action-btn move-btn" onclick="moveImage(${index}, -1)" ${index === 0 ? 'disabled' : ''}>Mundur</button>
+                    <button class="action-btn move-btn" onclick="moveImage(${index}, 1)" ${index === imageFiles.length - 1 ? 'disabled' : ''}>Maju</button>
                     <button class="action-btn rotate-btn" onclick="rotateImage(${index})">Putar</button>
                     <button class="action-btn delete-btn" onclick="removeImage(${index})">Hapus</button>
                 </div>
@@ -657,6 +729,7 @@ function switchMergeMode(mode) {
     document.getElementById('mergeImagesMode').style.display = mode === 'images' ? 'block' : 'none';
     document.getElementById('mergePdfsMode').style.display = mode === 'pdfs' ? 'block' : 'none';
     updateMergeButton();
+    scrollToActiveUploadArea('merge-pdf');
 }
 
 function addMergeImages(files) {
@@ -730,6 +803,8 @@ function updateMergeImagesPreview() {
             <div class="image-actions">
                 <span class="image-name">${imgData.file.name}</span>
                 <div class="action-buttons">
+                    <button class="action-btn move-btn" onclick="moveMergeImage(${index}, -1)" ${index === 0 ? 'disabled' : ''}>Mundur</button>
+                    <button class="action-btn move-btn" onclick="moveMergeImage(${index}, 1)" ${index === mergeImageFiles.length - 1 ? 'disabled' : ''}>Maju</button>
                     <button class="action-btn delete-btn" onclick="removeMergeImage(${index})">Hapus</button>
                 </div>
             </div>`;
@@ -776,7 +851,11 @@ function updateMergePdfsPreview() {
                 <div class="pdf-preview-loading"><div class="spinner-mini"></div></div>
             </div>
             <div class="merge-pdf-name">${pdfData.file.name}</div>
-            <div class="merge-pdf-size">${formatFileSize(pdfData.size)}</div>`;
+            <div class="merge-pdf-size">${formatFileSize(pdfData.size)}</div>
+            <div class="merge-pdf-actions">
+                <button class="action-btn move-btn" onclick="moveMergePdf(${index}, -1)" ${index === 0 ? 'disabled' : ''}>Mundur</button>
+                <button class="action-btn move-btn" onclick="moveMergePdf(${index}, 1)" ${index === mergePdfFiles.length - 1 ? 'disabled' : ''}>Maju</button>
+            </div>`;
         grid.appendChild(item);
 
         renderPdfPreview(pdfData.file, pdfData.id);
@@ -810,6 +889,20 @@ async function renderPdfPreview(file, id) {
 
 function removeMergeImage(index) { URL.revokeObjectURL(mergeImageFiles[index].previewUrl); mergeImageFiles.splice(index, 1); updateMergeImagesPreview(); }
 function removeMergePdf(index) { mergePdfFiles.splice(index, 1); updateMergePdfsPreview(); }
+
+function moveMergeImage(index, direction) {
+    const target = index + direction;
+    if (target < 0 || target >= mergeImageFiles.length) return;
+    [mergeImageFiles[index], mergeImageFiles[target]] = [mergeImageFiles[target], mergeImageFiles[index]];
+    updateMergeImagesPreview();
+}
+
+function moveMergePdf(index, direction) {
+    const target = index + direction;
+    if (target < 0 || target >= mergePdfFiles.length) return;
+    [mergePdfFiles[index], mergePdfFiles[target]] = [mergePdfFiles[target], mergePdfFiles[index]];
+    updateMergePdfsPreview();
+}
 
 function clearMergeImages() { mergeImageFiles.forEach(img => URL.revokeObjectURL(img.previewUrl)); mergeImageFiles = []; updateMergeImagesPreview(); }
 function clearMergePdfs() { mergePdfFiles = []; updateMergePdfsPreview(); }

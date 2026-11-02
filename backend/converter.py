@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import shutil
 import zipfile
+import threading
 import cv2
 import numpy as np
 
@@ -1007,7 +1008,7 @@ def _remove_watermark_from_pdf(pdf_path, output_path, mode='bottom', threshold=0
     ditutup dengan kotak putih langsung di halaman vektor asli, sehingga
     ukuran file tidak membengkak.
     """
-    import fitz  
+    import fitz
 
     doc = fitz.open(pdf_path)
     white = (1, 1, 1)
@@ -1080,7 +1081,7 @@ def _remove_watermark_inpaint_from_pdf(pdf_path, output_path, inpaint_radius=5):
     pembersihan file lain.
     """
     try:
-        import fitz  
+        import fitz
     except ImportError:
         raise Exception("PyMuPDF tidak terinstall. Jalankan: pip install PyMuPDF")
 
@@ -1320,7 +1321,100 @@ def _order_corners(pts):
 
     return rect
 
-def get_document_boundary(input_path: str):
+# =============================================
+# DETEKSI AREA DOKUMEN (YOLOv8 + FALLBACK OPENCV)
+# =============================================
+
+# Lokasi model hasil pelatihan: backend/models/best.pt
+YOLO_MODEL_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "models", "best.pt"
+)
+# Deteksi di bawah nilai ini diabaikan, lalu dipakai metode OpenCV
+YOLO_CONF_THRESHOLD = 0.25
+
+_yolo_model = None
+_yolo_load_attempted = False
+_yolo_lock = threading.Lock()
+
+def _get_yolo_model():
+    """
+    Muat model YOLO satu kali (lazy). Mengembalikan None jika ultralytics
+    belum terinstall, file best.pt tidak ada, atau model gagal dimuat,
+    sehingga aplikasi tetap berjalan memakai metode OpenCV.
+    """
+    global _yolo_model, _yolo_load_attempted
+
+    if _yolo_load_attempted:
+        return _yolo_model
+
+    with _yolo_lock:
+        if _yolo_load_attempted:
+            return _yolo_model
+
+        _yolo_load_attempted = True
+
+        if not os.path.exists(YOLO_MODEL_PATH):
+            print(f"Model YOLO tidak ditemukan di {YOLO_MODEL_PATH}, memakai metode OpenCV.")
+            return None
+
+        try:
+            from ultralytics import YOLO
+            _yolo_model = YOLO(YOLO_MODEL_PATH)
+            print("Model YOLO berhasil dimuat.")
+        except ImportError:
+            print("ultralytics tidak terinstall (pip install ultralytics), memakai metode OpenCV.")
+            _yolo_model = None
+        except Exception as e:
+            print(f"Gagal memuat model YOLO: {e}. Memakai metode OpenCV.")
+            _yolo_model = None
+
+    return _yolo_model
+
+def _detect_boundary_yolo(img):
+    """
+    Jalankan YOLO pada gambar (array BGR dari cv2) dan kembalikan bounding box
+    dengan confidence tertinggi sebagai dict (x, y, width, height, ...).
+    Mengembalikan None jika model tidak tersedia atau tidak ada deteksi.
+    Model detection maupun segmentation sama-sama menghasilkan kotak (boxes).
+    """
+    model = _get_yolo_model()
+    if model is None:
+        return None
+
+    h, w = img.shape[:2]
+
+    try:
+        result = model(img, conf=YOLO_CONF_THRESHOLD, verbose=False)[0]
+    except Exception as e:
+        print(f"Inferensi YOLO gagal: {e}. Memakai metode OpenCV.")
+        return None
+
+    boxes = result.boxes
+    if boxes is None or len(boxes) == 0:
+        return None
+
+    best = int(boxes.conf.argmax())
+    x1, y1, x2, y2 = boxes.xyxy[best].tolist()
+
+    x = max(0, int(x1))
+    y = max(0, int(y1))
+    bw = min(w - x, int(x2 - x1))
+    bh = min(h - y, int(y2 - y1))
+
+    # Abaikan kotak yang terlalu kecil (kemungkinan deteksi keliru)
+    if bw < w * 0.1 or bh < h * 0.1:
+        return None
+
+    return {
+        'x': x,
+        'y': y,
+        'width': bw,
+        'height': bh,
+        'image_width': w,
+        'image_height': h
+    }
+
+def _get_document_boundary_opencv(input_path: str):
     """Deteksi boundary super agresif untuk objek dengan background warna senada"""
     img = cv2.imread(input_path)
     if img is None:
@@ -1378,3 +1472,24 @@ def get_document_boundary(input_path: str):
         'image_width': w,
         'image_height': h
     }
+
+def get_document_boundary(input_path: str):
+    """
+    Deteksi area dokumen pada gambar.
+    1. Coba model YOLOv8 hasil pelatihan sendiri (models/best.pt).
+    2. Jika model tidak tersedia atau tidak mendeteksi apa pun, pakai OpenCV.
+    Hasil memuat kunci 'method' ('yolo' atau 'opencv') untuk memudahkan
+    pengecekan metode mana yang sedang dipakai.
+    """
+    img = cv2.imread(input_path)
+    if img is None:
+        raise Exception("Gagal membaca gambar")
+
+    boundary = _detect_boundary_yolo(img)
+    if boundary is not None:
+        boundary['method'] = 'yolo'
+        return boundary
+
+    boundary = _get_document_boundary_opencv(input_path)
+    boundary['method'] = 'opencv'
+    return boundary

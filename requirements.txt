@@ -14,7 +14,7 @@ pytesseract
 pdf2image
 opencv-python 
 PyMuPDF>=1.23.0
-ultralytics
+ultralytics==8.4.121
 python-pptx>=0.6.23
 openpyxl>=3.1.0 
 camelot-py>=0.11.0 

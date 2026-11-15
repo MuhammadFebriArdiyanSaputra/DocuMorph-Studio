@@ -1,8 +1,12 @@
 from pdf2docx import Converter
 import os
 import sys
-import pythoncom
-import win32com.client
+try:
+    import pythoncom
+    import win32com.client
+except ImportError:
+    pythoncom = None
+    win32com = None
 from docx import Document
 from docx.shared import Cm
 from PIL import Image

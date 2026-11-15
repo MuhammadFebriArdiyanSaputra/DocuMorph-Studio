@@ -1,3 +1,11 @@
+// =============================================
+// KONFIGURASI BACKEND URL
+// Kosongkan "" jika berjalan satu server / lokal.
+// Isi dengan URL Hugging Face Spaces saat frontend di-deploy di Vercel:
+// Contoh: const API_BASE_URL = "https://username-space.hf.space";
+// =============================================
+const API_BASE_URL = "";
+
 let currentMode = 'pdf-to-word';
 let selectedFiles = [];
 let imageFiles = [];
@@ -544,7 +552,7 @@ async function autoDetectCrop() {
     formData.append('file', scanFile);
 
     try {
-        const response = await fetch('/detect-boundary', {
+        const response = await fetch(`${API_BASE_URL}/detect-boundary`, {
             method: 'POST',
             body: formData
         });

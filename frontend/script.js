@@ -4,6 +4,7 @@ let imageFiles = [];
 let draggedIndex = null;
 let modalCallback = null;
 let compressFile = null;
+let compressImageFile = null;
 let mergeMode = 'images';
 let mergeImageFiles = [];
 let mergePdfFiles = [];
@@ -13,20 +14,21 @@ let splitFile = null;
 let splitMode = 'range';
 let toastTimeout;
 
-// Scan variables
+// Scan variables (CamScanner-Style 4-Corner Quadrilateral)
 let scanFile = null;
-let scanBoundary = { x: 0, y: 0, width: 0, height: 0 };
+let scanCorners = [
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 }
+];
 let scanImageWidth = 0;
 let scanImageHeight = 0;
-let isDragging = false;
-let isResizing = false;
-let activeHandle = null;
+let activeCornerIndex = null;
+let isDraggingQuad = false;
 let dragStartX = 0;
 let dragStartY = 0;
-let cropStartX = 0;
-let cropStartY = 0;
-let cropStartW = 0;
-let cropStartH = 0;
+let initialCorners = [];
 
 // PDF.js worker
 if (window.pdfjsLib) {
@@ -37,8 +39,8 @@ if (window.pdfjsLib) {
 // KATEGORI & NAVIGASI 2 TINGKAT
 // ==========================================
 const CATEGORY_TOOLS = {
-    convert: ['pdf-to-word', 'word-to-pdf', 'image-to-pdf', 'ppt-to-pdf', 'pdf-to-ppt', 'excel-to-pdf', 'pdf-to-excel'],
-    organize: ['merge-pdf', 'split-pdf', 'compress-pdf'],
+    convert: ['pdf-to-word', 'word-to-pdf', 'pdf-to-markdown', 'word-to-markdown', 'image-to-pdf', 'ppt-to-pdf', 'pdf-to-ppt', 'excel-to-pdf', 'pdf-to-excel'],
+    organize: ['merge-pdf', 'split-pdf', 'compress-pdf', 'compress-image'],
     clean: ['remove-watermark', 'scan-document']
 };
 const TOOL_CATEGORY = {};
@@ -47,10 +49,12 @@ Object.entries(CATEGORY_TOOLS).forEach(([cat, tools]) => {
 });
 
 // Mode yang memakai area upload generik #singleFileUpload (satu file masuk, satu file keluar)
-const SINGLE_FILE_MODES = ['pdf-to-word', 'word-to-pdf', 'ppt-to-pdf', 'pdf-to-ppt', 'excel-to-pdf', 'pdf-to-excel'];
+const SINGLE_FILE_MODES = ['pdf-to-word', 'word-to-pdf', 'pdf-to-markdown', 'word-to-markdown', 'ppt-to-pdf', 'pdf-to-ppt', 'excel-to-pdf', 'pdf-to-excel'];
 const SINGLE_FILE_ACCEPT = {
     'pdf-to-word': '.pdf',
     'word-to-pdf': '.docx,.doc',
+    'pdf-to-markdown': '.pdf',
+    'word-to-markdown': '.docx,.doc',
     'ppt-to-pdf': '.pptx,.ppt',
     'pdf-to-ppt': '.pdf',
     'excel-to-pdf': '.xlsx,.xls',
@@ -66,6 +70,8 @@ function getActiveUploadAreaId(mode) {
     const map = {
         'pdf-to-word': 'singleFileUpload',
         'word-to-pdf': 'singleFileUpload',
+        'pdf-to-markdown': 'singleFileUpload',
+        'word-to-markdown': 'singleFileUpload',
         'ppt-to-pdf': 'singleFileUpload',
         'pdf-to-ppt': 'singleFileUpload',
         'excel-to-pdf': 'singleFileUpload',
@@ -74,7 +80,8 @@ function getActiveUploadAreaId(mode) {
         'compress-pdf': 'compressUpload',
         'split-pdf': 'splitUpload',
         'remove-watermark': 'watermarkUpload',
-        'scan-document': 'scanUpload'
+        'scan-document': 'scanUpload',
+        'compress-image': 'compressImageUpload'
     };
     if (mode === 'merge-pdf') {
         return mergeMode === 'images' ? 'mergeImagesUpload' : 'mergePdfsUpload';
@@ -171,12 +178,15 @@ function switchTab(mode) {
     const tabTexts = {
         'pdf-to-word': 'PDF → Word',
         'word-to-pdf': 'Word → PDF',
+        'pdf-to-markdown': 'PDF → Markdown (AI)',
+        'word-to-markdown': 'Word → Markdown (AI)',
         'image-to-pdf': 'Image → PDF',
         'ppt-to-pdf': 'PowerPoint → PDF',
         'pdf-to-ppt': 'PDF → PowerPoint',
         'excel-to-pdf': 'Excel → PDF',
         'pdf-to-excel': 'PDF → Excel',
         'compress-pdf': 'Compress PDF',
+        'compress-image': 'Compress Gambar',
         'merge-pdf': 'Merge PDF',
         'split-pdf': 'Split PDF',
         'remove-watermark': 'Remove Watermark',
@@ -188,6 +198,7 @@ function switchTab(mode) {
 
     // Reset state
     selectedFiles = []; imageFiles = []; compressFile = null; watermarkFile = null; scanFile = null; splitFile = null;
+    compressImageFile = null;
     document.getElementById('singleFileInput').value = '';
     document.getElementById('multipleFileInput').value = '';
     document.getElementById('compressFileInput').value = '';
@@ -196,20 +207,30 @@ function switchTab(mode) {
     document.getElementById('watermarkFileInput').value = '';
     document.getElementById('scanFileInput').value = '';
     document.getElementById('splitFileInput').value = '';
+    document.getElementById('compressImageFileInput').value = '';
     document.getElementById('singleFileInfo').textContent = '';
     document.getElementById('compressFileInfo').textContent = '';
     document.getElementById('watermarkFileInfo').textContent = '';
     document.getElementById('splitFileInfo').textContent = '';
+    document.getElementById('compressImageFileInfo').textContent = '';
     document.getElementById('convertBtn').disabled = true;
+    document.getElementById('convertBtn').style.display = 'flex';
     document.getElementById('status').className = 'status';
     document.getElementById('status').style.display = 'none';
-    document.getElementById('btnText').textContent = 'Convert Sekarang';
+    document.getElementById('btnText').textContent = ['pdf-to-markdown', 'word-to-markdown'].includes(mode) ? 'Convert ke Markdown' : 'Convert Sekarang';
     document.getElementById('compressOptions').style.display = 'none';
     document.getElementById('compressResult').style.display = 'none';
+    document.getElementById('compressImageOptions').style.display = 'none';
+    document.getElementById('compressImageResult').style.display = 'none';
     document.getElementById('pdfConvertOptions').style.display = 'none';
+    document.getElementById('markdownInfoBanner').style.display = ['pdf-to-markdown', 'word-to-markdown'].includes(mode) ? 'flex' : 'none';
+    document.getElementById('markdownResult').style.display = 'none';
     document.getElementById('watermarkOptions').style.display = 'none';
     document.getElementById('scanPreviewContainer').style.display = 'none';
     document.getElementById('splitOptions').style.display = 'none';
+    window.compressedImageBlob = null;
+    window.currentMarkdownText = '';
+    window.currentMarkdownBlob = null;
 
     // Show/hide containers
     document.getElementById('singleFileUpload').style.display = SINGLE_FILE_MODES.includes(mode) ? 'block' : 'none';
@@ -219,6 +240,7 @@ function switchTab(mode) {
     document.getElementById('splitPdfContainer').style.display = mode === 'split-pdf' ? 'block' : 'none';
     document.getElementById('removeWatermarkContainer').style.display = mode === 'remove-watermark' ? 'block' : 'none';
     document.getElementById('scanContainer').style.display = mode === 'scan-document' ? 'block' : 'none';
+    document.getElementById('compressImageContainer').style.display = mode === 'compress-image' ? 'block' : 'none';
     document.getElementById('imagePreviewContainer').style.display = 'none';
 
     if (SINGLE_FILE_MODES.includes(mode)) {
@@ -263,6 +285,10 @@ document.getElementById('splitFileInput').addEventListener('change', (e) => {
     if (e.target.files.length > 0) handleSplitFile(e.target.files[0]);
 });
 
+document.getElementById('compressImageFileInput').addEventListener('change', (e) => {
+    if (e.target.files.length > 0) handleCompressImageFile(e.target.files[0]);
+});
+
 // ==========================================
 // UPLOAD AREA CLICK
 // ==========================================
@@ -287,6 +313,7 @@ setupUploadAreaClick('mergePdfsUpload', 'mergePdfsInput');
 setupUploadAreaClick('watermarkUpload', 'watermarkFileInput');
 setupUploadAreaClick('scanUpload', 'scanFileInput');
 setupUploadAreaClick('splitUpload', 'splitFileInput');
+setupUploadAreaClick('compressImageUpload', 'compressImageFileInput');
 
 // ==========================================
 // DRAG & DROP
@@ -310,17 +337,19 @@ setupDragDrop(document.getElementById('mergePdfsUpload'), (f) => addMergePdfs(f 
 setupDragDrop(document.getElementById('watermarkUpload'), (f) => handleWatermarkFile(f));
 setupDragDrop(document.getElementById('scanUpload'), (f) => handleScanFile(f));
 setupDragDrop(document.getElementById('splitUpload'), (f) => handleSplitFile(f));
+setupDragDrop(document.getElementById('compressImageUpload'), (f) => handleCompressImageFile(f));
 
 // ==========================================
-// SINGLE FILE (PDF<->Word, PPT->PDF, PDF->PPT, Excel->PDF, PDF->Excel)
+// SINGLE FILE (PDF<->Word, PPT->PDF, PDF->PPT, Excel->PDF, PDF->Excel, Markdown)
 // ==========================================
 function handleSingleFile(file) {
     if (!file) return;
     selectedFiles = [file];
     document.getElementById('singleFileInfo').textContent = `${file.name} (${formatFileSize(file.size)})`;
     document.getElementById('convertBtn').disabled = false;
-    document.getElementById('btnText').textContent = 'Convert Sekarang';
+    document.getElementById('btnText').textContent = ['pdf-to-markdown', 'word-to-markdown'].includes(currentMode) ? 'Convert ke Markdown' : 'Convert Sekarang';
     document.getElementById('pdfConvertOptions').style.display = currentMode === 'pdf-to-word' ? 'block' : 'none';
+    document.getElementById('markdownInfoBanner').style.display = ['pdf-to-markdown', 'word-to-markdown'].includes(currentMode) ? 'flex' : 'none';
 }
 
 // ==========================================
@@ -347,6 +376,14 @@ document.querySelectorAll('.compress-level-card').forEach(card => {
     });
 });
 
+document.querySelectorAll('.compress-image-level-card').forEach(card => {
+    card.addEventListener('click', function() {
+        document.querySelectorAll('.compress-image-level-card').forEach(c => c.classList.remove('active'));
+        this.classList.add('active');
+        this.querySelector('input[type="radio"]').checked = true;
+    });
+});
+
 function resetCompress() {
     compressFile = null;
     document.getElementById('compressFileInput').value = '';
@@ -356,6 +393,35 @@ function resetCompress() {
     document.getElementById('convertBtn').disabled = true;
     document.getElementById('btnText').textContent = 'Convert Sekarang';
     window.compressedBlob = null;
+}
+
+// ==========================================
+// COMPRESS IMAGE
+// ==========================================
+function handleCompressImageFile(file) {
+    if (!file) return;
+    const validExts = ['.jpg', '.jpeg', '.png', '.webp'];
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    if (!validExts.includes(ext)) { showToast('File harus JPG, PNG, atau WEBP!', 'error'); return; }
+    if (file.size > 30 * 1024 * 1024) { showToast('File terlalu besar! Maksimal 30MB.', 'error'); return; }
+
+    compressImageFile = file;
+    document.getElementById('compressImageFileInfo').textContent = `${file.name} (${formatFileSize(file.size)})`;
+    document.getElementById('compressImageOptions').style.display = 'block';
+    document.getElementById('compressImageResult').style.display = 'none';
+    document.getElementById('convertBtn').disabled = false;
+    document.getElementById('btnText').textContent = 'Kompres Gambar';
+}
+
+function resetCompressImage() {
+    compressImageFile = null;
+    document.getElementById('compressImageFileInput').value = '';
+    document.getElementById('compressImageFileInfo').textContent = '';
+    document.getElementById('compressImageOptions').style.display = 'none';
+    document.getElementById('compressImageResult').style.display = 'none';
+    document.getElementById('convertBtn').disabled = true;
+    document.getElementById('btnText').textContent = 'Convert Sekarang';
+    window.compressedImageBlob = null;
 }
 
 // ==========================================
@@ -439,8 +505,13 @@ function handleScanFile(file) {
         img.onload = () => {
             scanImageWidth = img.naturalWidth;
             scanImageHeight = img.naturalHeight;
-            resetCrop();
-            setTimeout(() => autoDetectCrop(), 300);
+            // Tunggu 2 frame agar browser selesai layout image di dalam flex container
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    resetCrop();
+                    autoDetectCrop();
+                });
+            });
         };
     };
     reader.readAsDataURL(file);
@@ -448,14 +519,20 @@ function handleScanFile(file) {
 
 function resetCrop() {
     const img = document.getElementById('scanPreviewImage');
-    const imgRect = img.getBoundingClientRect();
+    if (!img) return;
+    const w = img.offsetWidth;
+    const h = img.offsetHeight;
+    if (w <= 0 || h <= 0) return;
 
-    scanBoundary = {
-        x: imgRect.width * 0.1,
-        y: imgRect.height * 0.1,
-        width: imgRect.width * 0.8,
-        height: imgRect.height * 0.8
-    };
+    const padX = w * 0.06;
+    const padY = h * 0.06;
+
+    scanCorners = [
+        { x: padX, y: padY },                 // 0: Top-Left
+        { x: w - padX, y: padY },             // 1: Top-Right
+        { x: w - padX, y: h - padY },         // 2: Bottom-Right
+        { x: padX, y: h - padY }              // 3: Bottom-Left
+    ];
 
     updateCropOverlay();
 }
@@ -473,41 +550,62 @@ async function autoDetectCrop() {
         });
 
         if (response.ok) {
-            const boundary = await response.json();
-
+            const data = await response.json();
             const img = document.getElementById('scanPreviewImage');
-            const imgRect = img.getBoundingClientRect();
+            const renderW = img.offsetWidth;
+            const renderH = img.offsetHeight;
 
-            const scaleX = imgRect.width / boundary.image_width;
-            const scaleY = imgRect.height / boundary.image_height;
+            const scaleX = renderW / data.image_width;
+            const scaleY = renderH / data.image_height;
 
-            scanBoundary = {
-                x: boundary.x * scaleX,
-                y: boundary.y * scaleY,
-                width: boundary.width * scaleX,
-                height: boundary.height * scaleY
-            };
+            if (data.corners && Array.isArray(data.corners) && data.corners.length === 4) {
+                // Ekstrak 4 titik sudut asli (mendukung bentuk miring / jajar genjang / trapesium)
+                scanCorners = data.corners.map(pt => ({
+                    x: Math.max(0, Math.min(renderW, pt[0] * scaleX)),
+                    y: Math.max(0, Math.min(renderH, pt[1] * scaleY))
+                }));
+            } else {
+                // Fallback dari bounding box persegi
+                const x1 = data.x * scaleX;
+                const y1 = data.y * scaleY;
+                const x2 = (data.x + data.width) * scaleX;
+                const y2 = (data.y + data.height) * scaleY;
+                scanCorners = [
+                    { x: x1, y: y1 },
+                    { x: x2, y: y1 },
+                    { x: x2, y: y2 },
+                    { x: x1, y: y2 }
+                ];
+            }
 
             updateCropOverlay();
-            showToast('Area dokumen terdeteksi', 'success', 2000);
+            showToast('Sudut dokumen terdeteksi otomatis', 'success', 2000);
         }
     } catch (err) {
-        showToast('Auto detect gagal, gunakan crop manual', 'error');
+        showToast('Auto detect gagal, sesuaikan sudut secara manual', 'error');
     }
 }
 
 function updateCropOverlay() {
-    const overlay = document.getElementById('scanCropOverlay');
-    if (!overlay) return;
+    const polygon = document.getElementById('scanCropPolygon');
+    if (!polygon || !scanCorners || scanCorners.length !== 4) return;
 
-    overlay.style.left = scanBoundary.x + 'px';
-    overlay.style.top = scanBoundary.y + 'px';
-    overlay.style.width = scanBoundary.width + 'px';
-    overlay.style.height = scanBoundary.height + 'px';
+    // Perbarui titik-titik pada poligon SVG
+    const pointsStr = scanCorners.map(p => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+    polygon.setAttribute('points', pointsStr);
+
+    // Perbarui posisi 4 titik kontrol sudut
+    const cornerIds = ['cornerTL', 'cornerTR', 'cornerBR', 'cornerBL'];
+    cornerIds.forEach((id, idx) => {
+        const handle = document.getElementById(id);
+        if (handle && scanCorners[idx]) {
+            handle.style.left = `${scanCorners[idx].x}px`;
+            handle.style.top = `${scanCorners[idx].y}px`;
+        }
+    });
 }
 
-// Crop overlay drag & resize - mendukung mouse (desktop) DAN touch (mobile).
-// Event mouse dan touch ditangani lewat fungsi bersama supaya perilakunya identik.
+// Interaksi geser sudut dan poligon (Mouse & Touch)
 function getPointFromEvent(e) {
     if (e.touches && e.touches.length > 0) {
         return { x: e.touches[0].clientX, y: e.touches[0].clientY };
@@ -515,59 +613,60 @@ function getPointFromEvent(e) {
     return { x: e.clientX, y: e.clientY };
 }
 
-function handleCropDragStart(e) {
-    if (e.target.classList.contains('crop-handle')) return;
+function handleCornerDragStart(idx, e) {
+    e.stopPropagation();
+    activeCornerIndex = idx;
+    isDraggingQuad = false;
     const pt = getPointFromEvent(e);
-    isDragging = true;
     dragStartX = pt.x;
     dragStartY = pt.y;
-    cropStartX = scanBoundary.x;
-    cropStartY = scanBoundary.y;
+    initialCorners = scanCorners.map(p => ({ ...p }));
     if (e.cancelable) e.preventDefault();
 }
 
-function handleCropResizeStart(handleName, e) {
-    e.stopPropagation();
+function handlePolygonDragStart(e) {
+    activeCornerIndex = null;
+    isDraggingQuad = true;
     const pt = getPointFromEvent(e);
-    isResizing = true;
-    activeHandle = handleName;
     dragStartX = pt.x;
     dragStartY = pt.y;
-    cropStartX = scanBoundary.x;
-    cropStartY = scanBoundary.y;
-    cropStartW = scanBoundary.width;
-    cropStartH = scanBoundary.height;
+    initialCorners = scanCorners.map(p => ({ ...p }));
     if (e.cancelable) e.preventDefault();
 }
 
 function handleCropMove(e) {
-    if (!isDragging && !isResizing) return;
+    if (activeCornerIndex === null && !isDraggingQuad) return;
     const pt = getPointFromEvent(e);
+    const dx = pt.x - dragStartX;
+    const dy = pt.y - dragStartY;
 
-    if (isDragging) {
-        const dx = pt.x - dragStartX;
-        const dy = pt.y - dragStartY;
-        scanBoundary.x = Math.max(0, cropStartX + dx);
-        scanBoundary.y = Math.max(0, cropStartY + dy);
+    const img = document.getElementById('scanPreviewImage');
+    const maxW = img ? img.offsetWidth : 9999;
+    const maxH = img ? img.offsetHeight : 9999;
+
+    if (activeCornerIndex !== null) {
+        // Geser satu sudut bebas (bisa membentuk jajar genjang / trapesium)
+        const orig = initialCorners[activeCornerIndex];
+        scanCorners[activeCornerIndex] = {
+            x: Math.max(0, Math.min(maxW, orig.x + dx)),
+            y: Math.max(0, Math.min(maxH, orig.y + dy))
+        };
         updateCropOverlay();
-    } else if (isResizing) {
-        const dx = pt.x - dragStartX;
-        const dy = pt.y - dragStartY;
+    } else if (isDraggingQuad) {
+        // Geser seluruh bidang dokumen bersamaan
+        let validDx = dx;
+        let validDy = dy;
+        initialCorners.forEach(p => {
+            if (p.x + validDx < 0) validDx = -p.x;
+            if (p.x + validDx > maxW) validDx = maxW - p.x;
+            if (p.y + validDy < 0) validDy = -p.y;
+            if (p.y + validDy > maxH) validDy = maxH - p.y;
+        });
 
-        if (activeHandle.includes('r')) {
-            scanBoundary.width = Math.max(30, cropStartW + dx);
-        }
-        if (activeHandle.includes('b')) {
-            scanBoundary.height = Math.max(30, cropStartH + dy);
-        }
-        if (activeHandle.includes('l')) {
-            scanBoundary.x = cropStartX + dx;
-            scanBoundary.width = Math.max(30, cropStartW - dx);
-        }
-        if (activeHandle.includes('t')) {
-            scanBoundary.y = cropStartY + dy;
-            scanBoundary.height = Math.max(30, cropStartH - dy);
-        }
+        scanCorners = initialCorners.map(p => ({
+            x: p.x + validDx,
+            y: p.y + validDy
+        }));
         updateCropOverlay();
     }
 
@@ -575,22 +674,25 @@ function handleCropMove(e) {
 }
 
 function handleCropEnd() {
-    isDragging = false;
-    isResizing = false;
-    activeHandle = null;
+    activeCornerIndex = null;
+    isDraggingQuad = false;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    const overlay = document.getElementById('scanCropOverlay');
+    // Daftarkan listener untuk 4 titik sudut
+    ['cornerTL', 'cornerTR', 'cornerBR', 'cornerBL'].forEach((id, idx) => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('mousedown', (e) => handleCornerDragStart(idx, e));
+            el.addEventListener('touchstart', (e) => handleCornerDragStart(idx, e), { passive: false });
+        }
+    });
 
-    if (overlay) {
-        overlay.addEventListener('mousedown', handleCropDragStart);
-        overlay.addEventListener('touchstart', handleCropDragStart, { passive: false });
-
-        document.querySelectorAll('.crop-handle').forEach(handle => {
-            handle.addEventListener('mousedown', (e) => handleCropResizeStart(handle.dataset.handle, e));
-            handle.addEventListener('touchstart', (e) => handleCropResizeStart(handle.dataset.handle, e), { passive: false });
-        });
+    // Daftarkan listener pada area dalam poligon (untuk geser serempak)
+    const polygon = document.getElementById('scanCropPolygon');
+    if (polygon) {
+        polygon.addEventListener('mousedown', handlePolygonDragStart);
+        polygon.addEventListener('touchstart', handlePolygonDragStart, { passive: false });
     }
 
     document.addEventListener('mousemove', handleCropMove);
@@ -722,8 +824,8 @@ function renderImageGrid() {
 // ==========================================
 function switchMergeMode(mode) {
     mergeMode = mode;
-    document.querySelectorAll('.merge-mode-tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.merge-mode-tab').forEach(t => {
+    document.querySelectorAll('#mergePdfContainer .merge-mode-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('#mergePdfContainer .merge-mode-tab').forEach(t => {
         if ((mode === 'images' && t.textContent.trim() === 'Gabungkan Gambar') || (mode === 'pdfs' && t.textContent.trim() === 'Gabungkan PDF')) t.classList.add('active');
     });
     document.getElementById('mergeImagesMode').style.display = mode === 'images' ? 'block' : 'none';
@@ -923,9 +1025,21 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
     if (currentMode === 'image-to-pdf' && !imageFiles.length) return showToast('Tidak ada gambar!', 'error');
     if (SINGLE_FILE_MODES.includes(currentMode) && !selectedFiles.length) return showToast('Tidak ada file!', 'error');
     if (currentMode === 'compress-pdf' && !compressFile) return showToast('Tidak ada PDF!', 'error');
+    if (currentMode === 'compress-image' && !compressImageFile) return showToast('Tidak ada gambar!', 'error');
     if (currentMode === 'remove-watermark' && !watermarkFile) return showToast('Tidak ada file!', 'error');
     if (currentMode === 'scan-document' && !scanFile) return showToast('Tidak ada gambar!', 'error');
-    if (currentMode === 'split-pdf' && !splitFile) return showToast('Tidak ada PDF!', 'error');
+    if (currentMode === 'split-pdf') {
+        if (!splitFile) return showToast('Tidak ada PDF!', 'error');
+        if (splitMode === 'range' && !document.getElementById('splitRangeInput').value.trim()) {
+            return showToast('Range halaman tidak boleh kosong! (Contoh: 1-3, 5)', 'error');
+        }
+        if (splitMode === 'every') {
+            const val = parseInt(document.getElementById('splitEveryInput').value);
+            if (!val || val < 1) {
+                return showToast('Jumlah halaman per file minimal 1!', 'error');
+            }
+        }
+    }
     if (currentMode === 'merge-pdf' && ((mergeMode === 'images' && !mergeImageFiles.length) || (mergeMode === 'pdfs' && !mergePdfFiles.length))) return showToast('Tidak ada file!', 'error');
 
     btnText.style.display = 'none';
@@ -948,6 +1062,9 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
     } else if (currentMode === 'compress-pdf') {
         formData.append('file', compressFile);
         formData.append('compression_level', document.querySelector('input[name="compression"]:checked')?.value || 'medium');
+    } else if (currentMode === 'compress-image') {
+        formData.append('file', compressImageFile);
+        formData.append('compression_level', document.querySelector('input[name="image_compression"]:checked')?.value || 'medium');
     } else if (currentMode === 'merge-pdf') {
         if (mergeMode === 'images') {
             mergeImageFiles.forEach(img => formData.append('files', img.file));
@@ -970,27 +1087,46 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
         formData.append('mode', document.getElementById('watermarkMode').value);
     } else if (currentMode === 'scan-document') {
         const img = document.getElementById('scanPreviewImage');
-        const imgRect = img.getBoundingClientRect();
+        const renderW = img.offsetWidth;
+        const renderH = img.offsetHeight;
+        const scaleX = scanImageWidth / renderW;
+        const scaleY = scanImageHeight / renderH;
 
-        const scaleX = scanImageWidth / imgRect.width;
-        const scaleY = scanImageHeight / imgRect.height;
+        // Skala 4 titik sudut ke resolusi asli gambar untuk perspective transform
+        const originalCorners = scanCorners.map(p => [
+            Math.round(p.x * scaleX),
+            Math.round(p.y * scaleY)
+        ]);
 
         formData.append('file', scanFile);
-        formData.append('crop_x', Math.round(scanBoundary.x * scaleX));
-        formData.append('crop_y', Math.round(scanBoundary.y * scaleY));
-        formData.append('crop_w', Math.round(scanBoundary.width * scaleX));
-        formData.append('crop_h', Math.round(scanBoundary.height * scaleY));
+        formData.append('corners', JSON.stringify(originalCorners));
+
+        // Bounding box fallback
+        const xs = originalCorners.map(p => p[0]);
+        const ys = originalCorners.map(p => p[1]);
+        const minX = Math.max(0, Math.min(...xs));
+        const minY = Math.max(0, Math.min(...ys));
+        const maxX = Math.min(scanImageWidth, Math.max(...xs));
+        const maxY = Math.min(scanImageHeight, Math.max(...ys));
+
+        formData.append('crop_x', minX);
+        formData.append('crop_y', minY);
+        formData.append('crop_w', maxX - minX);
+        formData.append('crop_h', maxY - minY);
     }
 
     const endpoints = {
         'pdf-to-word': '/convert/pdf-to-word',
         'word-to-pdf': '/convert/word-to-pdf',
+        'pdf-to-markdown': '/convert/pdf-to-markdown',
+        'word-to-markdown': '/convert/word-to-markdown',
         'image-to-pdf': '/convert/image-to-pdf',
         'ppt-to-pdf': '/convert/ppt-to-pdf',
         'pdf-to-ppt': '/convert/pdf-to-ppt',
         'excel-to-pdf': '/convert/excel-to-pdf',
         'pdf-to-excel': '/convert/pdf-to-excel',
         'compress-pdf': '/compress/pdf',
+        'compress-image': '/compress/image',
         'merge-pdf': mergeMode === 'images' ? '/merge/images' : '/merge/pdf',
         'split-pdf': '/split/pdf',
         'remove-watermark': '/remove-watermark',
@@ -1013,11 +1149,67 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
             document.getElementById('compressOptions').style.display = 'none';
             document.getElementById('compressResult').style.display = 'block';
             window.compressedBlob = blob;
+        } else if (currentMode === 'compress-image') {
+            const os = parseInt(response.headers.get('X-Original-Size') || compressImageFile.size);
+            const cs = parseInt(response.headers.get('X-Compressed-Size') || blob.size);
+            const ratio = parseFloat(response.headers.get('X-Compression-Ratio') || ((1 - cs/os) * 100).toFixed(1));
+            document.getElementById('imageOriginalSize').textContent = formatFileSize(os);
+            document.getElementById('imageCompressedSize').textContent = formatFileSize(cs);
+            document.getElementById('imageSavedSize').textContent = `${ratio}%`;
+            document.getElementById('compressImageOptions').style.display = 'none';
+            document.getElementById('compressImageResult').style.display = 'block';
+            window.compressedImageBlob = blob;
+            showStatus('Kompresi gambar berhasil!', 'success');
+        } else if (currentMode === 'pdf-to-markdown' || currentMode === 'word-to-markdown') {
+            // Simpan blob untuk download ulang
+            window.currentMarkdownBlob = blob;
+
+            // Baca teks markdown untuk statistik & preview
+            const markdownText = await blob.text();
+            window.currentMarkdownText = markdownText;
+
+            // Hitung statistik
+            const charCount = markdownText.length;
+            const wordCount = markdownText.trim().split(/\s+/).filter(Boolean).length;
+            const tokenEstimate = Math.ceil(charCount / 4); // ~4 karakter per token
+
+            document.getElementById('mdCharCount').textContent = charCount.toLocaleString('id-ID');
+            document.getElementById('mdWordCount').textContent = wordCount.toLocaleString('id-ID');
+            document.getElementById('mdTokenEstimate').textContent = `~${tokenEstimate.toLocaleString('id-ID')}`;
+
+            // Set preview (batasi 3000 char agar tidak lag)
+            const previewText = markdownText.length > 3000
+                ? markdownText.substring(0, 3000) + '\n\n... (terpotong, download file untuk konten lengkap)'
+                : markdownText;
+            document.getElementById('markdownPreviewCode').textContent = previewText;
+
+            // Auto-download file .md
+            const contentDisp = response.headers.get('content-disposition') || '';
+            const match = contentDisp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+            const filename = match ? match[1].trim() : `${selectedFiles[0]?.name?.replace(/\.[^.]+$/, '') || 'dokumen'}.md`;
+
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            URL.revokeObjectURL(url);
+
+            // Tampilkan result box, sembunyikan convert btn & upload
+            document.getElementById('singleFileUpload').style.display = 'none';
+            document.getElementById('convertBtn').style.display = 'none';
+            document.getElementById('status').style.display = 'none';
+            document.getElementById('markdownResult').style.display = 'block';
+            document.getElementById('markdownPreviewArea').style.display = 'none';
         } else {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = response.headers.get('content-disposition')?.match(/filename="?([^"]+)"?/)?.[1] || 'file';
+            const contentDisp = response.headers.get('content-disposition') || '';
+            const match = contentDisp.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+            a.download = match ? match[1].trim() : 'file';
             document.body.appendChild(a);
             a.click();
             a.remove();
@@ -1029,7 +1221,9 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
     } finally {
         btnText.style.display = 'inline';
         spinner.style.display = 'none';
-        document.getElementById('convertBtn').disabled = false;
+        if (currentMode !== 'pdf-to-markdown' && currentMode !== 'word-to-markdown') {
+            document.getElementById('convertBtn').disabled = false;
+        }
     }
 });
 
@@ -1046,9 +1240,63 @@ document.getElementById('downloadCompressedBtn')?.addEventListener('click', () =
     }
 });
 
+document.getElementById('downloadCompressedImageBtn')?.addEventListener('click', () => {
+    if (window.compressedImageBlob) {
+        const url = URL.createObjectURL(window.compressedImageBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `compressed_${compressImageFile?.name || 'image.jpg'}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    }
+});
+
 // ==========================================
-// UTILITY
+// MARKDOWN RESULT ACTIONS
 // ==========================================
+async function copyMarkdownContent() {
+    if (!window.currentMarkdownText) return;
+    try {
+        await navigator.clipboard.writeText(window.currentMarkdownText);
+        const btn = document.getElementById('copyBtnText');
+        btn.textContent = '✅ Tersalin!';
+        setTimeout(() => { btn.textContent = 'Salin Teks Markdown'; }, 2500);
+    } catch (e) {
+        showToast('Gagal menyalin ke clipboard', 'error');
+    }
+}
+
+function downloadCurrentMarkdown() {
+    if (!window.currentMarkdownBlob) return;
+    const filename = `${selectedFiles[0]?.name?.replace(/\.[^.]+$/, '') || 'dokumen'}.md`;
+    const url = URL.createObjectURL(window.currentMarkdownBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast('File .md terdownload!', 'success');
+}
+
+function toggleMarkdownPreview() {
+    const area = document.getElementById('markdownPreviewArea');
+    const btn = document.getElementById('togglePreviewBtn');
+    const isShowing = area.style.display !== 'none';
+    area.style.display = isShowing ? 'none' : 'block';
+    btn.textContent = isShowing ? '👁️ Lihat Pratinjau' : '🙈 Sembunyikan';
+}
+
+function resetMarkdown() {
+    window.currentMarkdownText = '';
+    window.currentMarkdownBlob = null;
+    switchTab(currentMode);
+}
+
+
 function formatFileSize(bytes) {
     if (bytes === 0) return '0 Bytes';
     const k = 1024, sizes = ['Bytes', 'KB', 'MB', 'GB'];

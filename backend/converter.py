@@ -4,56 +4,18 @@ import sys
 import pythoncom
 import win32com.client
 from docx import Document
-from docx.shared import Cm, Inches, Emu
-from docx.enum.section import WD_ORIENT
+from docx.shared import Cm
 from PIL import Image
 import img2pdf
-import json
 from reportlab.lib.pagesizes import A4, letter, legal
-from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
-import subprocess
 import tempfile
 import shutil
 import zipfile
 import threading
+import uuid
 import cv2
 import numpy as np
-
-# =============================================
-# MARGIN & FORMATTING HELPERS
-# =============================================
-
-def get_docx_margins(docx_path):
-    """Ambil margin dari file DOCX asli"""
-    doc = Document(docx_path)
-    margins = []
-    for section in doc.sections:
-        margins.append({
-            'top': section.top_margin,
-            'bottom': section.bottom_margin,
-            'left': section.left_margin,
-            'right': section.right_margin,
-            'page_width': section.page_width,
-            'page_height': section.page_height,
-            'orientation': section.orientation
-        })
-    return margins
-
-def set_docx_margins(docx_path, margins):
-    """Set margin pada file DOCX"""
-    doc = Document(docx_path)
-    for i, section in enumerate(doc.sections):
-        if i < len(margins):
-            m = margins[i]
-            section.top_margin = m['top']
-            section.bottom_margin = m['bottom']
-            section.left_margin = m['left']
-            section.right_margin = m['right']
-            section.page_width = m['page_width']
-            section.page_height = m['page_height']
-            section.orientation = m['orientation']
-    doc.save(docx_path)
 
 # =============================================
 # PDF TO WORD CONVERTERS (MULTI-METHOD)
@@ -414,13 +376,21 @@ def convert_pdf_to_excel(input_path: str, output_path: str):
     from openpyxl import Workbook
     from openpyxl.utils.dataframe import dataframe_to_rows
 
-    tables = camelot.read_pdf(input_path, pages='all', flavor='lattice')
+    tables = []
+    try:
+        tables = camelot.read_pdf(input_path, pages='all', flavor='lattice')
+    except Exception as e:
+        print(f"Lattice flavor gagal (Ghostscript mungkin belum terpasang): {e}")
 
-    if len(tables) == 0:
-        # Fallback ke flavor 'stream' untuk tabel tanpa garis bingkai jelas
-        tables = camelot.read_pdf(input_path, pages='all', flavor='stream')
+    if not tables or len(tables) == 0:
+        # Fallback ke flavor 'stream' untuk tabel tanpa garis bingkai jelas (tidak butuh Ghostscript)
+        try:
+            tables = camelot.read_pdf(input_path, pages='all', flavor='stream')
+        except Exception as e:
+            print(f"Stream flavor juga gagal: {e}")
+            tables = []
 
-    if len(tables) == 0:
+    if not tables or len(tables) == 0:
         raise Exception("Tidak ada tabel yang terdeteksi di dalam PDF")
 
     wb = Workbook()
@@ -573,13 +543,16 @@ def convert_images_to_pdf_with_options(
 
             img_w, img_h = image.size
 
+            target_dpi = 150
+            dpi_scale = target_dpi / 72.0
+
             if fit == 'inside':
                 ratio = min(page_w / img_w, page_h / img_h)
             elif fit == 'fill':
                 ratio = max(page_w / img_w, page_h / img_h)
             elif fit == 'stretch':
-                new_w = page_w
-                new_h = page_h
+                new_w = page_w * dpi_scale
+                new_h = page_h * dpi_scale
 
                 temp_path = img_path + f'_stretch_{i}.png'
                 image_resized = image.resize(
@@ -597,9 +570,6 @@ def convert_images_to_pdf_with_options(
                 continue
             else:
                 ratio = min(page_w / img_w, page_h / img_h)
-
-            target_dpi = 150
-            dpi_scale = target_dpi / 72.0
 
             new_w = img_w * ratio * dpi_scale
             new_h = img_h * ratio * dpi_scale
@@ -675,29 +645,15 @@ def _convert_images_original_size_high_quality(image_paths, rotation_angles, out
     if not processed_images:
         raise Exception("Tidak ada gambar yang bisa diproses")
 
-    with open(output_path, 'wb') as f:
-        f.write(img2pdf.convert(processed_images))
-
-    for temp_path in processed_images:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    try:
+        with open(output_path, 'wb') as f:
+            f.write(img2pdf.convert(processed_images))
+    finally:
+        for temp_path in processed_images:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
 
     return output_path
-
-def convert_single_image_to_pdf(
-    image_path: str,
-    output_path: str,
-    page_size: str = 'A4',
-    fit: str = 'inside'
-):
-    """Convert satu gambar ke PDF"""
-    return convert_images_to_pdf_with_options(
-        [image_path],
-        output_path,
-        [0],
-        page_size,
-        fit
-    )
 
 # =============================================
 # IMAGE COMPRESSOR
@@ -706,58 +662,83 @@ def convert_single_image_to_pdf(
 def compress_image(
     input_path: str,
     output_path: str,
-    quality: int = 85,
-    max_size: tuple = None
+    compression_level: str = 'medium',
+    quality: int = None
 ):
-    """Kompres gambar"""
+    """
+    Kompres gambar (JPG, PNG, WEBP) berdasarkan level kompresi:
+    - low: quality 85, scale 1.0
+    - medium: quality 70, scale 0.90
+    - high: quality 50, scale 0.75
+    - extreme: quality 30, scale 0.60
+    """
     try:
+        settings_map = {
+            'low':     {'quality': 85, 'scale': 1.0,  'colors': 256},
+            'medium':  {'quality': 70, 'scale': 0.9,  'colors': 192},
+            'high':    {'quality': 50, 'scale': 0.75, 'colors': 128},
+            'extreme': {'quality': 30, 'scale': 0.6,  'colors': 64},
+        }
+        cfg = settings_map.get(compression_level, settings_map['medium'])
+        actual_quality = quality if quality is not None else cfg['quality']
+        scale = cfg['scale']
+
         image = Image.open(input_path)
+        orig_w, orig_h = image.size
 
-        if image.mode in ('RGBA', 'LA', 'P'):
-            rgb_image = Image.new('RGB', image.size, (255, 255, 255))
-            if image.mode == 'P':
-                image = image.convert('RGBA')
-            rgb_image.paste(
-                image,
-                mask=image.split()[-1] if image.mode in ('RGBA', 'LA') else None
-            )
-            image = rgb_image
+        if scale < 1.0:
+            new_w = max(1, int(orig_w * scale))
+            new_h = max(1, int(orig_h * scale))
+            image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
-        if max_size:
-            image.thumbnail(max_size, Image.Resampling.LANCZOS)
+        ext = os.path.splitext(output_path)[1].lower()
 
-        ext = output_path.lower()
-        if ext.endswith('.jpg') or ext.endswith('.jpeg'):
-            image.save(output_path, 'JPEG', quality=quality, optimize=True)
-        elif ext.endswith('.png'):
-            image.save(output_path, 'PNG', optimize=True)
-        elif ext.endswith('.webp'):
-            image.save(output_path, 'WEBP', quality=quality)
+        if ext in ('.jpg', '.jpeg'):
+            if image.mode in ('RGBA', 'LA', 'P'):
+                rgb_image = Image.new('RGB', image.size, (255, 255, 255))
+                if image.mode == 'P':
+                    image = image.convert('RGBA')
+                mask = image.split()[-1] if image.mode in ('RGBA', 'LA') else None
+                rgb_image.paste(image, mask=mask)
+                image = rgb_image
+            elif image.mode != 'RGB':
+                image = image.convert('RGB')
+            image.save(output_path, 'JPEG', quality=actual_quality, optimize=True)
+
+        elif ext == '.png':
+            if compression_level in ('medium', 'high', 'extreme') and image.mode in ('RGB', 'RGBA'):
+                try:
+                    quantized = image.quantize(colors=cfg['colors'], method=Image.Quantize.MEDIANCUT)
+                    quantized.save(output_path, 'PNG', optimize=True)
+                except Exception:
+                    image.save(output_path, 'PNG', optimize=True)
+            else:
+                image.save(output_path, 'PNG', optimize=True)
+
+        elif ext == '.webp':
+            image.save(output_path, 'WEBP', quality=actual_quality, method=6)
         else:
-            image.save(output_path, 'JPEG', quality=quality, optimize=True)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            image.save(output_path, 'JPEG', quality=actual_quality, optimize=True)
 
-        return output_path
+        original_size = os.path.getsize(input_path)
+        compressed_size = os.path.getsize(output_path)
+
+        if compressed_size >= original_size:
+            shutil.copy2(input_path, output_path)
+            compressed_size = original_size
+
+        ratio = (1 - compressed_size / original_size) * 100 if original_size else 0
+
+        return {
+            'original_size': original_size,
+            'compressed_size': compressed_size,
+            'ratio': round(ratio, 1)
+        }
 
     except Exception as e:
         raise Exception(f"Gagal kompres gambar: {str(e)}")
-
-def compress_multiple_images(image_paths, output_dir, quality=85, max_size=None):
-    """Kompres multiple gambar"""
-    os.makedirs(output_dir, exist_ok=True)
-    output_paths = []
-
-    for img_path in image_paths:
-        filename = os.path.basename(img_path)
-        name, ext = os.path.splitext(filename)
-        output_path = os.path.join(output_dir, f"{name}_compressed{ext}")
-
-        try:
-            compress_image(img_path, output_path, quality, max_size)
-            output_paths.append(output_path)
-        except Exception as e:
-            print(f"Error compressing {filename}: {str(e)}")
-
-    return output_paths
 
 # =============================================
 # PDF COMPRESSOR
@@ -849,29 +830,6 @@ def compress_pdf(
         'compressed_size': compressed_size,
         'ratio': round(ratio, 1)
     }
-
-def get_pdf_info(input_path: str):
-    """Dapatkan informasi file PDF"""
-    try:
-        from pypdf import PdfReader
-    except ImportError:
-        raise Exception("pypdf tidak terinstall")
-
-    reader = PdfReader(input_path)
-
-    info = {
-        'pages': len(reader.pages),
-        'size': os.path.getsize(input_path),
-        'size_formatted': format_file_size(os.path.getsize(input_path)),
-        'metadata': {}
-    }
-
-    if reader.metadata:
-        for key in ['/Title', '/Author', '/Subject', '/Creator', '/Producer']:
-            if key in reader.metadata:
-                info['metadata'][key.replace('/', '')] = reader.metadata[key]
-
-    return info
 
 def format_file_size(size_bytes):
     """Format ukuran file"""
@@ -1218,24 +1176,38 @@ def scan_document(
     crop_x: int = 0,
     crop_y: int = 0,
     crop_w: int = 0,
-    crop_h: int = 0
+    crop_h: int = 0,
+    corners: list = None
 ):
-    """Scan dokumen: crop area konten dari gambar"""
+    """Scan dokumen: luruskan perspektif dokumen miring atau crop area dokumen"""
     img = cv2.imread(input_path)
     if img is None:
         raise Exception("Gagal membaca gambar")
 
     h, w = img.shape[:2]
 
-    if crop_w > 0 and crop_h > 0:
-        crop_x = max(0, min(crop_x, w - 10))
-        crop_y = max(0, min(crop_y, h - 10))
-        crop_w = min(crop_w, w - crop_x)
-        crop_h = min(crop_h, h - crop_y)
-
-        result = img[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
+    # Prioritas 1: 4 titik sudut dokumen miring/jajar genjang (perspective transform)
+    if corners and len(corners) == 4:
+        try:
+            pts = np.array(corners, dtype="float32")
+            result = _perspective_transform(img, pts)
+        except Exception as e:
+            print(f"Perspective transform gagal: {e}, beralih ke crop biasa.")
+            result = None
     else:
-        result = _auto_crop_document(img)
+        result = None
+
+    # Prioritas 2: Bounding box biasa jika tidak ada 4 sudut
+    if result is None:
+        if crop_w > 0 and crop_h > 0:
+            crop_x = max(0, min(crop_x, w - 10))
+            crop_y = max(0, min(crop_y, h - 10))
+            crop_w = min(crop_w, w - crop_x)
+            crop_h = min(crop_h, h - crop_y)
+
+            result = img[crop_y:crop_y+crop_h, crop_x:crop_x+crop_w]
+        else:
+            result = _auto_crop_document(img)
 
     cv2.imwrite(output_path, result)
     return output_path
@@ -1372,16 +1344,25 @@ def _get_yolo_model():
 
 def _detect_boundary_yolo(img):
     """
-    Jalankan YOLO pada gambar (array BGR dari cv2) dan kembalikan bounding box
-    dengan confidence tertinggi sebagai dict (x, y, width, height, ...).
-    Mengembalikan None jika model tidak tersedia atau tidak ada deteksi.
-    Model detection maupun segmentation sama-sama menghasilkan kotak (boxes).
+    Jalankan YOLO (detection atau segmentation) pada gambar (BGR array dari cv2).
+
+    Untuk model segmentasi (YOLOv11-seg, YOLOv8-seg):
+      - Ekstrak 4 titik sudut (quadrilateral) dari polygon mask dengan convex hull
+        dan approxPolyDP / minAreaRect sehingga mendukung dokumen miring / jajar genjang.
+      - Pakai mask polygon untuk bounding box dan sudut sebenarnya.
+    Untuk model detection biasa:
+      - Pakai boxes.xyxy.
+
+    Validasi tambahan:
+      - Coverage 8%–99% dari luas gambar (dokumen kertas A4 dari dekat sering mengisi 90-98% frame).
+      - Aspek rasio 1.0–4.2 (rentang wajar dokumen/kartu).
     """
     model = _get_yolo_model()
     if model is None:
         return None
 
     h, w = img.shape[:2]
+    img_area = w * h
 
     try:
         result = model(img, conf=YOLO_CONF_THRESHOLD, verbose=False)[0]
@@ -1393,93 +1374,241 @@ def _detect_boundary_yolo(img):
     if boxes is None or len(boxes) == 0:
         return None
 
+    # --- Pilih deteksi dengan confidence tertinggi ---
     best = int(boxes.conf.argmax())
-    x1, y1, x2, y2 = boxes.xyxy[best].tolist()
 
-    x = max(0, int(x1))
-    y = max(0, int(y1))
+    corners = None
+    x1 = y1 = x2 = y2 = None
+
+    # --- Utamakan mask polygon jika model adalah segmentation ---
+    if result.masks is not None and len(result.masks) > best:
+        try:
+            mask_pts = result.masks.xy[best]  # (N, 2) koordinat gambar asli
+            if len(mask_pts) >= 4:
+                pts = mask_pts.astype(np.float32)
+                # 1. Hitung rotated minimum bounding box dari mask (selalu presisi mengikuti sudut rotasi kertas)
+                rect = cv2.minAreaRect(pts)
+                box = cv2.boxPoints(rect)
+                rect_area = cv2.contourArea(box)
+
+                # 2. Hitung polygon approx via convex hull
+                hull = cv2.convexHull(pts)
+                peri = cv2.arcLength(hull, True)
+                approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
+
+                # Jika approx 4 titik dan luasnya tidak memotong mask (>= 88% rotated rect), pakai approx (perspektif).
+                # Jika tidak, pakai rotated rect (rotasi miring murni / jajar genjang).
+                if len(approx) == 4 and cv2.contourArea(approx) >= (rect_area * 0.88):
+                    quad = approx.reshape(4, 2)
+                else:
+                    quad = box
+
+                ordered_pts = _order_corners(quad)
+                corners = [[float(p[0]), float(p[1])] for p in ordered_pts]
+                xs = [p[0] for p in corners]
+                ys = [p[1] for p in corners]
+                x1, y1 = min(xs), min(ys)
+                x2, y2 = max(xs), max(ys)
+        except Exception as e:
+            print(f"YOLO mask parsing warning: {e}")
+            corners = None
+
+    # Fallback ke bounding box jika mask tidak tersedia / gagal
+    if x1 is None:
+        x1, y1, x2, y2 = boxes.xyxy[best].tolist()
+        corners = [
+            [float(x1), float(y1)],
+            [float(x2), float(y1)],
+            [float(x2), float(y2)],
+            [float(x1), float(y2)]
+        ]
+
+    x  = max(0, int(x1))
+    y  = max(0, int(y1))
     bw = min(w - x, int(x2 - x1))
     bh = min(h - y, int(y2 - y1))
 
-    # Abaikan kotak yang terlalu kecil (kemungkinan deteksi keliru)
-    if bw < w * 0.1 or bh < h * 0.1:
+    # --- Validasi 1: Ukuran minimum ---
+    if bw < w * 0.08 or bh < h * 0.08:
+        print(f"YOLO: kotak terlalu kecil ({bw}x{bh}), beralih ke OpenCV.")
         return None
+
+    # --- Validasi 2: Coverage maksimum (dokumen riil bisa sampai 98.5%) ---
+    coverage = (bw * bh) / img_area
+    if coverage > 0.99:
+        print(f"YOLO: coverage terlalu besar ({coverage*100:.1f}%), beralih ke OpenCV.")
+        return None
+
+    # --- Validasi 3: Aspek rasio wajar (1.0–4.2) ---
+    if bw > 0 and bh > 0:
+        aspect = max(bw, bh) / min(bw, bh)
+        if aspect > 4.2:
+            print(f"YOLO: aspek rasio tidak wajar ({aspect:.2f}), beralih ke OpenCV.")
+            return None
 
     return {
         'x': x,
         'y': y,
         'width': bw,
         'height': bh,
+        'corners': corners,
         'image_width': w,
         'image_height': h
     }
 
 def _get_document_boundary_opencv(input_path: str):
-    """Deteksi boundary super agresif untuk objek dengan background warna senada"""
+    """
+    Deteksi batas dokumen/kartu menggunakan OpenCV murni.
+    Mengekstrak 4 sudut dokumen (quadrilateral) untuk mendukung dokumen perspektif/jajar genjang.
+    Strategi multi-pass:
+      1. Canny edge + contour approximation (paling akurat untuk kontras tinggi).
+      2. Morphological gradient + Otsu threshold (lebih tahan warna senada).
+      3. HSV saturation mask (efektif untuk kartu plastik berwarna di meja kayu).
+      4. Adaptive threshold (fallback untuk foto low-contrast/cahaya tidak merata).
+    """
+    import numpy as np
+
     img = cv2.imread(input_path)
     if img is None:
         raise Exception("Gagal membaca gambar")
 
     h, w = img.shape[:2]
+    img_area = w * h
 
+    def _valid_bbox(cx, cy, cbw, cbh, label=""):
+        """Kembalikan True jika bbox masuk batas coverage & aspek rasio wajar."""
+        if cbw < w * 0.08 or cbh < h * 0.08:
+            return False
+        cov = (cbw * cbh) / img_area
+        if cov < 0.08 or cov > 0.985:
+            return False
+        if cbw > 0 and cbh > 0:
+            ar = max(cbw, cbh) / min(cbw, cbh)
+            if ar > 4.5:
+                return False
+        if label:
+            print(f"OpenCV[{label}]: bbox=({cx},{cy},{cbw},{cbh}) cov={cov*100:.1f}%")
+        return True
+
+    def _extract_best_contour(mask, label=""):
+        """Ambil kontur terbesar yang valid beserta 4 sudutnya."""
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        closed = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel2)
+        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        contours = sorted(contours, key=cv2.contourArea, reverse=True)
+        for c in contours[:5]:
+            if cv2.contourArea(c) < img_area * 0.06:
+                continue
+            cx, cy, cbw, cbh = cv2.boundingRect(c)
+            if _valid_bbox(cx, cy, cbw, cbh, label):
+                # Ekstrak 4 titik sudut
+                peri = cv2.arcLength(c, True)
+                approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+                if len(approx) == 4:
+                    quad = approx.reshape(4, 2)
+                else:
+                    rect = cv2.minAreaRect(c)
+                    quad = cv2.boxPoints(rect)
+                ordered_pts = _order_corners(quad)
+                corners = [[float(p[0]), float(p[1])] for p in ordered_pts]
+                return cx, cy, cbw, cbh, corners
+        return None
+
+    def _format_result(res):
+        cx, cy, cbw, cbh, corners = res
+        pad = 6
+        return {
+            'x': max(0, cx - pad), 'y': max(0, cy - pad),
+            'width': min(w - max(0, cx - pad), cbw + pad * 2),
+            'height': min(h - max(0, cy - pad), cbh + pad * 2),
+            'corners': corners,
+            'image_width': w, 'image_height': h
+        }
+
+    # ------------------------------------------------------------------
+    # Strategi 1: Canny edge detection
+    # ------------------------------------------------------------------
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    otsu_val, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    edges = cv2.Canny(blurred, otsu_val * 0.4, otsu_val)
+    res = _extract_best_contour(edges, "Canny")
+    if res:
+        return _format_result(res)
+
+    # ------------------------------------------------------------------
+    # Strategi 2: Morphological gradient + CLAHE + Otsu
+    # ------------------------------------------------------------------
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
-    cl = clahe.apply(l)
-    limg = cv2.merge((cl, a, b))
-    enhanced = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
-
+    l_ch, a_ch, b_ch = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    cl = clahe.apply(l_ch)
+    enhanced = cv2.cvtColor(cv2.merge((cl, a_ch, b_ch)), cv2.COLOR_LAB2BGR)
     kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     gradient = cv2.morphologyEx(enhanced, cv2.MORPH_GRADIENT, kernel_grad)
+    gray_g = cv2.cvtColor(gradient, cv2.COLOR_BGR2GRAY)
+    _, thresh_g = cv2.threshold(gray_g, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    res = _extract_best_contour(thresh_g, "MorphGrad")
+    if res:
+        return _format_result(res)
 
-    gray = cv2.cvtColor(gradient, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # ------------------------------------------------------------------
+    # Strategi 3: HSV Saturation (efektif kartu glossy / latar kayu)
+    # ------------------------------------------------------------------
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    s_ch = hsv[:, :, 1]
+    v_ch = hsv[:, :, 2]
+    _, thresh_s = cv2.threshold(s_ch, 60, 255, cv2.THRESH_BINARY)
+    _, thresh_v = cv2.threshold(v_ch, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    combined = cv2.bitwise_or(thresh_s, thresh_v)
+    res = _extract_best_contour(combined, "HSV-Sat")
+    if res:
+        return _format_result(res)
 
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel_close)
+    # ------------------------------------------------------------------
+    # Strategi 4: Adaptive threshold (foto cahaya tidak merata)
+    # ------------------------------------------------------------------
+    gray2 = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    adaptive = cv2.adaptiveThreshold(
+        gray2, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 51, 10
+    )
+    res = _extract_best_contour(adaptive, "Adaptive")
+    if res:
+        return _format_result(res)
 
-    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    x, y, bw, bh = int(w * 0.05), int(h * 0.05), int(w * 0.9), int(h * 0.9)
-
-    if contours:
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-        for contour in contours[:10]:
-            area = cv2.contourArea(contour)
-            if area < (w * h * 0.1):
-                continue
-
-            cx, cy, cbw, cbh = cv2.boundingRect(contour)
-
-            if cbw > w * 0.95 and cbh > h * 0.95:
-                continue
-
-            x, y, bw, bh = cx, cy, cbw, cbh
-            break
-
-    padding = 10
-    x = max(0, x - padding)
-    y = max(0, y - padding)
-    bw = min(w - x, bw + padding * 2)
-    bh = min(h - y, bh + padding * 2)
-
+    # ------------------------------------------------------------------
+    # Ultimate fallback: 88% gambar dengan margin 6%
+    # ------------------------------------------------------------------
+    print("OpenCV: semua strategi gagal, menggunakan fallback default.")
+    margin_x = int(w * 0.06)
+    margin_y = int(h * 0.06)
+    default_w = w - margin_x * 2
+    default_h = h - margin_y * 2
     return {
-        'x': x,
-        'y': y,
-        'width': bw,
-        'height': bh,
-        'image_width': w,
-        'image_height': h
+        'x': margin_x, 'y': margin_y,
+        'width': default_w, 'height': default_h,
+        'corners': [
+            [float(margin_x), float(margin_y)],
+            [float(margin_x + default_w), float(margin_y)],
+            [float(margin_x + default_w), float(margin_y + default_h)],
+            [float(margin_x), float(margin_y + default_h)]
+        ],
+        'image_width': w, 'image_height': h
     }
 
 def get_document_boundary(input_path: str):
     """
     Deteksi area dokumen pada gambar.
-    1. Coba model YOLOv8 hasil pelatihan sendiri (models/best.pt).
-    2. Jika model tidak tersedia atau tidak mendeteksi apa pun, pakai OpenCV.
-    Hasil memuat kunci 'method' ('yolo' atau 'opencv') untuk memudahkan
-    pengecekan metode mana yang sedang dipakai.
+    1. Coba model YOLOv11-seg (models/best.pt) — memanfaatkan mask segmentasi
+       untuk batas yang jauh lebih presisi dibanding bounding box biasa.
+    2. Jika YOLO tidak tersedia / tidak mendeteksi / hasil tidak valid,
+       jalankan pipeline OpenCV multi-strategi (Canny → MorphGrad → HSV → Adaptive).
+    Hasil memuat kunci 'method' ('yolo' atau 'opencv') untuk debugging.
     """
     img = cv2.imread(input_path)
     if img is None:
@@ -1493,3 +1622,105 @@ def get_document_boundary(input_path: str):
     boundary = _get_document_boundary_opencv(input_path)
     boundary['method'] = 'opencv'
     return boundary
+
+# =============================================
+# MARKDOWN CONVERTERS (FOR AI / LLM OPTIMIZATION)
+# =============================================
+
+def convert_pdf_to_markdown(input_path: str, output_path: str) -> str:
+    """
+    Convert PDF ke Markdown yang terstruktur rapi dan ramah LLM.
+    Menggunakan pymupdf4llm untuk mempertahankan heading, daftar, dan tabel.
+    Memiliki fallback ke PyMuPDF fitz jika terjadi anomali pada dokumen tertentu.
+    """
+    md_text = ""
+    try:
+        import pymupdf4llm
+        md_text = pymupdf4llm.to_markdown(input_path)
+    except Exception as e:
+        print(f"pymupdf4llm error: {e}, using PyMuPDF fallback")
+        import fitz
+        doc = fitz.open(input_path)
+        pages_content = []
+        for i, page in enumerate(doc):
+            text = page.get_text("text").strip()
+            if text:
+                pages_content.append(f"<!-- Page {i+1} -->\n\n{text}")
+        doc.close()
+        md_text = "\n\n---\n\n".join(pages_content)
+
+    if not md_text or not md_text.strip():
+        md_text = "_Tidak ada teks digital yang terdeteksi pada PDF ini. Jika dokumen berupa pindaian/scan gambar, gunakan OCR terlebih dahulu._"
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(md_text)
+
+    return output_path
+
+def convert_word_to_markdown(input_path: str, output_path: str) -> str:
+    """
+    Convert dokumen Word (.docx atau .doc) ke Markdown.
+    Menggunakan mammoth untuk konversi semantik docx -> markdown yang bersih.
+    Mendukung format .doc legacy via Microsoft Word COM jika tersedia.
+    Memiliki fallback ke python-docx jika terjadi kendala.
+    """
+    ext = os.path.splitext(input_path)[1].lower()
+    temp_docx = None
+
+    if ext == ".doc":
+        try:
+            pythoncom.CoInitialize()
+            word = win32com.client.Dispatch("Word.Application")
+            word.Visible = False
+            doc = word.Documents.Open(os.path.abspath(input_path))
+            temp_docx = os.path.join(tempfile.gettempdir(), f"{uuid.uuid4()}.docx")
+            doc.SaveAs2(temp_docx, FileFormat=16)  # 16 = wdFormatXMLDocument (docx)
+            doc.Close()
+            word.Quit()
+            target_docx = temp_docx
+        except Exception as e:
+            raise Exception(f"File .doc legacy memerlukan Microsoft Word terinstal untuk konversi ({str(e)}). Harap gunakan format .docx.")
+    else:
+        target_docx = input_path
+
+    md_text = ""
+    try:
+        import mammoth
+        with open(target_docx, "rb") as docx_file:
+            result = mammoth.convert_to_markdown(docx_file)
+            md_text = result.value
+    except Exception as e:
+        print(f"mammoth error: {e}, using python-docx fallback")
+        from docx import Document
+        doc = Document(target_docx)
+        lines = []
+        for p in doc.paragraphs:
+            text = p.text.strip()
+            if not text:
+                continue
+            style_name = p.style.name.lower() if p.style else ""
+            if "heading 1" in style_name:
+                lines.append(f"# {text}")
+            elif "heading 2" in style_name:
+                lines.append(f"## {text}")
+            elif "heading 3" in style_name:
+                lines.append(f"### {text}")
+            elif "list" in style_name:
+                lines.append(f"- {text}")
+            else:
+                lines.append(text)
+        md_text = "\n\n".join(lines)
+    finally:
+        if temp_docx and os.path.exists(temp_docx):
+            try:
+                os.remove(temp_docx)
+            except Exception:
+                pass
+
+    if not md_text or not md_text.strip():
+        md_text = "_Dokumen kosong atau tidak memiliki konten teks yang dapat diekstrak._"
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(md_text)
+
+    return output_path

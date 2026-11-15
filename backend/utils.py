@@ -2,8 +2,13 @@ import os
 import time
 import shutil
 
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "outputs"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+
+# Folder uploads & outputs berada di dalam folder backend atau project root
+# Jika ada di backend/, prioritaskan backend/; jika di root, gunakan root.
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 
 MAX_AGE_SECONDS = 30 * 60  
 
@@ -11,7 +16,15 @@ def cleanup_old_files():
     """Hapus file/folder yang tersisa di uploads/outputs lebih dari MAX_AGE_SECONDS."""
     now = time.time()
 
-    for base_dir in (UPLOAD_DIR, OUTPUT_DIR):
+    # Periksa baik di backend/ maupun di root (jika pernah terbuat di CWD berbeda)
+    target_dirs = {
+        UPLOAD_DIR,
+        OUTPUT_DIR,
+        os.path.join(PROJECT_ROOT, "uploads"),
+        os.path.join(PROJECT_ROOT, "outputs")
+    }
+
+    for base_dir in target_dirs:
         if not os.path.isdir(base_dir):
             continue
 

@@ -1,3 +1,9 @@
+import sys
+import os
+
+# Pastikan direktori backend masuk sys.path agar impor lokal selalu berhasil
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,7 +17,6 @@ import asyncio
 from typing import List, Optional
 import json
 from converter import (
-    convert_pdf_to_word,
     convert_pdf_to_word_ms_word,
     convert_pdf_to_word_preserve,
     convert_pdf_to_word_ocr,
@@ -22,10 +27,9 @@ from converter import (
     convert_excel_to_pdf,
     convert_pdf_to_excel,
     convert_images_to_pdf_with_options,
-    compress_image,
     compress_pdf,
+    compress_image,
     merge_pdf_files,
-    merge_images_to_pdf,
     remove_watermark_auto,
     remove_camscanner_watermark,
     remove_watermark_inpaint,
@@ -33,9 +37,20 @@ from converter import (
     get_document_boundary,
     split_pdf_by_ranges,
     split_pdf_every_n,
-    zip_files
+    zip_files,
+    convert_pdf_to_markdown,
+    convert_word_to_markdown
 )
 from utils import cleanup_old_files
+
+# =============================================
+# KONFIGURASI PATH
+# =============================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 
 # =============================================
 # PEMBERSIHAN FILE
@@ -62,8 +77,8 @@ async def _periodic_cleanup():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    os.makedirs("uploads", exist_ok=True)
-    os.makedirs("outputs", exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     task = asyncio.create_task(_periodic_cleanup())
     yield
     task.cancel()
@@ -80,14 +95,76 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # Serve frontend
-app.mount("/static", StaticFiles(directory="../frontend"), name="static")
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 @app.get("/")
 async def root():
-    return FileResponse("../frontend/index.html")
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+
+# =============================================
+# HELPER KONVERSI GAMBAR KE PDF (REUSABLE)
+# =============================================
+
+async def _process_images_to_pdf(
+    files: List[UploadFile],
+    rotations: Optional[str] = '[]',
+    page_size: Optional[str] = 'A4',
+    fit: Optional[str] = 'inside',
+    output_prefix: str = "converted_images"
+) -> FileResponse:
+    """Helper pemrosesan gambar ke PDF untuk menghindari duplikasi kode."""
+    allowed_extensions = ('.jpg', '.jpeg', '.png')
+    image_paths = []
+
+    try:
+        rotation_angles = json.loads(rotations)
+    except Exception:
+        rotation_angles = [0] * len(files)
+
+    if len(rotation_angles) != len(files):
+        rotation_angles = [0] * len(files)
+
+    for file in files:
+        if not file.filename.lower().endswith(allowed_extensions):
+            _delete_paths(*image_paths)
+            raise HTTPException(400, f"File {file.filename} bukan gambar (.jpg, .jpeg, .png)!")
+
+        input_filename = f"{uuid.uuid4()}_{file.filename}"
+        input_path = os.path.join(UPLOAD_DIR, input_filename)
+
+        with open(input_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+
+        image_paths.append(input_path)
+
+    output_filename = f"{uuid.uuid4()}.pdf"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        convert_images_to_pdf_with_options(
+            image_paths,
+            output_path,
+            rotation_angles,
+            page_size,
+            fit
+        )
+    except Exception as e:
+        _delete_paths(*image_paths)
+        raise HTTPException(500, f"Konversi gagal: {str(e)}")
+
+    _delete_paths(*image_paths)
+
+    return FileResponse(
+        output_path,
+        media_type='application/pdf',
+        filename=f"{output_prefix}.pdf",
+        background=BackgroundTask(_delete_path, output_path)
+    )
 
 # =============================================
 # PDF TO WORD (DENGAN PILIHAN METODE)
@@ -100,18 +177,18 @@ async def pdf_to_word(
 ):
     """Convert PDF ke Word dengan pilihan metode"""
 
-    if not file.filename.endswith('.pdf'):
+    if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(400, "File harus PDF!")
 
     input_filename = f"{uuid.uuid4()}.pdf"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}.docx"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         if method == 'ms_word':
@@ -131,7 +208,7 @@ async def pdf_to_word(
     return FileResponse(
         output_path,
         media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-        filename=f"converted_{file.filename.replace('.pdf', '.docx')}",
+        filename=f"converted_{os.path.splitext(file.filename)[0]}.docx",
         background=BackgroundTask(_delete_path, output_path)
     )
 
@@ -142,18 +219,18 @@ async def pdf_to_word(
 @app.post("/convert/word-to-pdf")
 async def word_to_pdf(file: UploadFile = File(...)):
     """Convert Word ke PDF"""
-    if not file.filename.endswith(('.docx', '.doc')):
+    if not file.filename.lower().endswith(('.docx', '.doc')):
         raise HTTPException(400, "File harus Word (.docx atau .doc)!")
 
     input_filename = f"{uuid.uuid4()}{os.path.splitext(file.filename)[1]}"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}.pdf"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         convert_word_to_pdf(input_path, output_path)
@@ -166,7 +243,77 @@ async def word_to_pdf(file: UploadFile = File(...)):
     return FileResponse(
         output_path,
         media_type='application/pdf',
-        filename=f"converted_{file.filename.replace('.docx', '.pdf').replace('.doc', '.pdf')}",
+        filename=f"converted_{os.path.splitext(file.filename)[0]}.pdf",
+        background=BackgroundTask(_delete_path, output_path)
+    )
+
+# =============================================
+# PDF TO MARKDOWN (AI / LLM OPTIMIZED)
+# =============================================
+
+@app.post("/convert/pdf-to-markdown")
+async def pdf_to_markdown(file: UploadFile = File(...)):
+    """Convert PDF ke Markdown yang teroptimasi untuk LLM (ChatGPT, Claude, Gemini)"""
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(400, "File harus PDF!")
+
+    input_filename = f"{uuid.uuid4()}.pdf"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
+
+    with open(input_path, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+
+    output_filename = f"{uuid.uuid4()}.md"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        convert_pdf_to_markdown(input_path, output_path)
+    except Exception as e:
+        _delete_path(input_path)
+        raise HTTPException(500, f"Konversi PDF ke Markdown gagal: {str(e)}")
+
+    _delete_path(input_path)
+
+    return FileResponse(
+        output_path,
+        media_type='text/markdown; charset=utf-8',
+        filename=f"{os.path.splitext(file.filename)[0]}.md",
+        background=BackgroundTask(_delete_path, output_path)
+    )
+
+# =============================================
+# WORD TO MARKDOWN (AI / LLM OPTIMIZED)
+# =============================================
+
+@app.post("/convert/word-to-markdown")
+async def word_to_markdown(file: UploadFile = File(...)):
+    """Convert Word (.docx/.doc) ke Markdown yang teroptimasi untuk LLM"""
+    if not file.filename.lower().endswith(('.docx', '.doc')):
+        raise HTTPException(400, "File harus Word (.docx atau .doc)!")
+
+    input_filename = f"{uuid.uuid4()}{os.path.splitext(file.filename)[1]}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
+
+    with open(input_path, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+
+    output_filename = f"{uuid.uuid4()}.md"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        convert_word_to_markdown(input_path, output_path)
+    except Exception as e:
+        _delete_path(input_path)
+        raise HTTPException(500, f"Konversi Word ke Markdown gagal: {str(e)}")
+
+    _delete_path(input_path)
+
+    return FileResponse(
+        output_path,
+        media_type='text/markdown; charset=utf-8',
+        filename=f"{os.path.splitext(file.filename)[0]}.md",
         background=BackgroundTask(_delete_path, output_path)
     )
 
@@ -181,14 +328,14 @@ async def ppt_to_pdf(file: UploadFile = File(...)):
         raise HTTPException(400, "File harus PowerPoint (.pptx atau .ppt)!")
 
     input_filename = f"{uuid.uuid4()}{os.path.splitext(file.filename)[1]}"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}.pdf"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         convert_ppt_to_pdf(input_path, output_path)
@@ -216,14 +363,14 @@ async def pdf_to_ppt(file: UploadFile = File(...)):
         raise HTTPException(400, "File harus PDF!")
 
     input_filename = f"{uuid.uuid4()}.pdf"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}.pptx"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         convert_pdf_to_ppt(input_path, output_path)
@@ -236,7 +383,7 @@ async def pdf_to_ppt(file: UploadFile = File(...)):
     return FileResponse(
         output_path,
         media_type='application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        filename=f"converted_{file.filename.replace('.pdf', '.pptx')}",
+        filename=f"converted_{os.path.splitext(file.filename)[0]}.pptx",
         background=BackgroundTask(_delete_path, output_path)
     )
 
@@ -251,14 +398,14 @@ async def excel_to_pdf(file: UploadFile = File(...)):
         raise HTTPException(400, "File harus Excel (.xlsx atau .xls)!")
 
     input_filename = f"{uuid.uuid4()}{os.path.splitext(file.filename)[1]}"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}.pdf"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         convert_excel_to_pdf(input_path, output_path)
@@ -286,14 +433,14 @@ async def pdf_to_excel(file: UploadFile = File(...)):
         raise HTTPException(400, "File harus PDF!")
 
     input_filename = f"{uuid.uuid4()}.pdf"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}.xlsx"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         convert_pdf_to_excel(input_path, output_path)
@@ -306,7 +453,7 @@ async def pdf_to_excel(file: UploadFile = File(...)):
     return FileResponse(
         output_path,
         media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        filename=f"converted_{file.filename.replace('.pdf', '.xlsx')}",
+        filename=f"converted_{os.path.splitext(file.filename)[0]}.xlsx",
         background=BackgroundTask(_delete_path, output_path)
     )
 
@@ -326,13 +473,13 @@ async def split_pdf_endpoint(
         raise HTTPException(400, "File harus PDF!")
 
     input_filename = f"{uuid.uuid4()}.pdf"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
-    split_dir = f"outputs/split_{uuid.uuid4()}"
+    split_dir = os.path.join(OUTPUT_DIR, f"split_{uuid.uuid4()}")
     os.makedirs(split_dir, exist_ok=True)
 
     try:
@@ -341,7 +488,7 @@ async def split_pdf_endpoint(
                 raise HTTPException(400, "Jumlah halaman per file tidak valid")
             output_paths = split_pdf_every_n(input_path, split_dir, every_n)
         else:
-            if not ranges:
+            if not ranges or not ranges.strip():
                 raise HTTPException(400, "Range halaman tidak boleh kosong")
             output_paths = split_pdf_by_ranges(input_path, split_dir, ranges)
     except HTTPException:
@@ -361,12 +508,11 @@ async def split_pdf_endpoint(
         result_path = output_paths[0]
         media_type = 'application/pdf'
         download_name = os.path.basename(result_path)
-        # split_dir (berisi result_path) dihapus setelah file selesai terkirim
         cleanup_after_send = [split_dir]
     else:
-        zip_path = f"outputs/{uuid.uuid4()}_split.zip"
+        zip_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4()}_split.zip")
         zip_files(output_paths, zip_path)
-        _delete_path(split_dir)  # sudah masuk ke zip, folder asalnya tidak dibutuhkan lagi
+        _delete_path(split_dir)
         result_path = zip_path
         media_type = 'application/zip'
         download_name = f"split_{base_name}.zip"
@@ -391,55 +537,8 @@ async def image_to_pdf(
     fit: Optional[str] = Form('inside')
 ):
     """Convert gambar ke PDF dengan sorting & rotasi"""
-
-    allowed_extensions = ('.jpg', '.jpeg', '.png')
-    image_paths = []
-    rotation_angles = []
-
-    try:
-        rotation_angles = json.loads(rotations)
-    except:
-        rotation_angles = [0] * len(files)
-
-    if len(rotation_angles) != len(files):
-        rotation_angles = [0] * len(files)
-
-    for file in files:
-        if not file.filename.lower().endswith(allowed_extensions):
-            _delete_paths(*image_paths)
-            raise HTTPException(400, f"File {file.filename} bukan gambar!")
-
-        input_filename = f"{uuid.uuid4()}_{file.filename}"
-        input_path = f"uploads/{input_filename}"
-
-        with open(input_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-
-        image_paths.append(input_path)
-
-    output_filename = f"{uuid.uuid4()}.pdf"
-    output_path = f"outputs/{output_filename}"
-
-    try:
-        convert_images_to_pdf_with_options(
-            image_paths,
-            output_path,
-            rotation_angles,
-            page_size,
-            fit
-        )
-    except Exception as e:
-        _delete_paths(*image_paths)
-        raise HTTPException(500, f"Konversi gagal: {str(e)}")
-
-    _delete_paths(*image_paths)
-
-    return FileResponse(
-        output_path,
-        media_type='application/pdf',
-        filename=f"converted_images.pdf",
-        background=BackgroundTask(_delete_path, output_path)
+    return await _process_images_to_pdf(
+        files, rotations, page_size, fit, output_prefix="converted_images"
     )
 
 # =============================================
@@ -450,11 +549,11 @@ async def image_to_pdf(
 async def compress_pdf_endpoint(
     file: UploadFile = File(...),
     compression_level: Optional[str] = Form('medium'),
-    image_quality: Optional[int] = Form(70)
+    image_quality: Optional[int] = Form(None)
 ):
     """Kompres file PDF"""
 
-    if not file.filename.endswith('.pdf'):
+    if not file.filename.lower().endswith('.pdf'):
         raise HTTPException(400, "File harus PDF!")
 
     valid_levels = ['low', 'medium', 'high', 'extreme']
@@ -462,14 +561,14 @@ async def compress_pdf_endpoint(
         raise HTTPException(400, f"Compression level harus salah satu dari: {', '.join(valid_levels)}")
 
     input_filename = f"{uuid.uuid4()}.pdf"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}_compressed.pdf"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         result = compress_pdf(
@@ -498,7 +597,71 @@ async def compress_pdf_endpoint(
     return response
 
 # =============================================
-# MERGE PDF
+# COMPRESS IMAGE
+# =============================================
+
+@app.post("/compress/image")
+async def compress_image_endpoint(
+    file: UploadFile = File(...),
+    compression_level: Optional[str] = Form('medium'),
+    quality: Optional[int] = Form(None)
+):
+    """Kompres file gambar (JPG, PNG, WEBP)"""
+
+    allowed_exts = ('.jpg', '.jpeg', '.png', '.webp')
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in allowed_exts:
+        raise HTTPException(400, "File harus gambar (.jpg, .jpeg, .png, .webp)!")
+
+    valid_levels = ['low', 'medium', 'high', 'extreme']
+    if compression_level not in valid_levels:
+        raise HTTPException(400, f"Compression level harus salah satu dari: {', '.join(valid_levels)}")
+
+    input_filename = f"{uuid.uuid4()}{ext}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
+
+    with open(input_path, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+
+    output_filename = f"{uuid.uuid4()}_compressed{ext}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        result = compress_image(
+            input_path,
+            output_path,
+            compression_level=compression_level,
+            quality=quality
+        )
+    except Exception as e:
+        _delete_path(input_path)
+        raise HTTPException(500, f"Kompresi gambar gagal: {str(e)}")
+
+    _delete_path(input_path)
+
+    media_type_map = {
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.png': 'image/png',
+        '.webp': 'image/webp'
+    }
+    media_type = media_type_map.get(ext, 'image/jpeg')
+
+    response = FileResponse(
+        output_path,
+        media_type=media_type,
+        filename=f"compressed_{file.filename}",
+        background=BackgroundTask(_delete_path, output_path)
+    )
+    response.headers['X-Original-Size'] = str(result['original_size'])
+    response.headers['X-Compressed-Size'] = str(result['compressed_size'])
+    response.headers['X-Compression-Ratio'] = str(result['ratio'])
+
+    return response
+
+# =============================================
+# MERGE PDF & MERGE IMAGES
 # =============================================
 
 @app.post("/merge/pdf")
@@ -516,7 +679,7 @@ async def merge_pdf_endpoint(
             raise HTTPException(400, f"File {file.filename} bukan PDF!")
 
         input_filename = f"{uuid.uuid4()}_{file.filename}"
-        input_path = f"uploads/{input_filename}"
+        input_path = os.path.join(UPLOAD_DIR, input_filename)
 
         with open(input_path, "wb") as buffer:
             content = await file.read()
@@ -525,10 +688,10 @@ async def merge_pdf_endpoint(
         pdf_paths.append(input_path)
 
     output_filename = f"{uuid.uuid4()}_merged.pdf"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
-        result = merge_pdf_files(pdf_paths, output_path, remove_metadata)
+        merge_pdf_files(pdf_paths, output_path, remove_metadata)
     except Exception as e:
         _delete_paths(*pdf_paths)
         raise HTTPException(500, f"Merge gagal: {str(e)}")
@@ -549,57 +712,14 @@ async def merge_images_endpoint(
     page_size: Optional[str] = Form('A4'),
     fit: Optional[str] = Form('inside')
 ):
-    """Gabungkan multiple gambar menjadi satu PDF"""
-
-    allowed_extensions = ('.jpg', '.jpeg', '.png')
-    image_paths = []
-    rotation_angles = []
-
-    try:
-        rotation_angles = json.loads(rotations)
-    except:
-        rotation_angles = [0] * len(files)
-
-    if len(rotation_angles) != len(files):
-        rotation_angles = [0] * len(files)
-
-    for file in files:
-        if not file.filename.lower().endswith(allowed_extensions):
-            _delete_paths(*image_paths)
-            raise HTTPException(400, f"File {file.filename} bukan gambar!")
-
-        input_filename = f"{uuid.uuid4()}_{file.filename}"
-        input_path = f"uploads/{input_filename}"
-
-        with open(input_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-
-        image_paths.append(input_path)
-
-    output_filename = f"{uuid.uuid4()}_merged_images.pdf"
-    output_path = f"outputs/{output_filename}"
-
-    try:
-        merge_images_to_pdf(
-            image_paths,
-            output_path,
-            page_size,
-            fit,
-            rotation_angles
-        )
-    except Exception as e:
-        _delete_paths(*image_paths)
-        raise HTTPException(500, f"Merge gagal: {str(e)}")
-
-    _delete_paths(*image_paths)
-
-    return FileResponse(
-        output_path,
-        media_type='application/pdf',
-        filename=f"merged_{len(files)}_images.pdf",
-        background=BackgroundTask(_delete_path, output_path)
+    """Gabungkan multiple gambar menjadi satu PDF (menggunakan helper bersama)"""
+    return await _process_images_to_pdf(
+        files, rotations, page_size, fit, output_prefix=f"merged_{len(files)}_images"
     )
+
+# =============================================
+# REMOVE WATERMARK
+# =============================================
 
 @app.post("/remove-watermark")
 async def remove_watermark_endpoint(
@@ -614,25 +734,22 @@ async def remove_watermark_endpoint(
         raise HTTPException(400, "File harus PDF, JPG, PNG, atau JPEG!")
 
     input_filename = f"{uuid.uuid4()}_{file.filename}"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
-    if file.filename.lower().endswith('.pdf'):
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext == '.pdf':
         output_ext = '.pdf'
+    elif ext in ('.jpg', '.jpeg'):
+        output_ext = '.jpg'
     else:
-        output_ext = os.path.splitext(file.filename)[1].lower()
-        if output_ext == '.jpg':
-            output_ext = '.jpg'
-        elif output_ext == '.jpeg':
-            output_ext = '.jpg'
-        else:
-            output_ext = '.png'
+        output_ext = '.png'
 
     output_filename = f"{uuid.uuid4()}_clean{output_ext}"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
 
     try:
         if mode == 'camscanner':
@@ -651,7 +768,13 @@ async def remove_watermark_endpoint(
 
     _delete_path(input_path)
 
-    media_type = 'application/pdf' if output_path.endswith('.pdf') else 'image/jpeg'
+    if output_path.endswith('.pdf'):
+        media_type = 'application/pdf'
+    elif output_path.endswith('.png'):
+        media_type = 'image/png'
+    else:
+        media_type = 'image/jpeg'
+
     return FileResponse(
         output_path,
         media_type=media_type,
@@ -659,35 +782,53 @@ async def remove_watermark_endpoint(
         background=BackgroundTask(_delete_path, output_path)
     )
 
+# =============================================
+# SCAN & DETECT DOCUMENT
+# =============================================
+
 @app.post("/scan-document")
 async def scan_document_endpoint(
     file: UploadFile = File(...),
     crop_x: Optional[int] = Form(0),
     crop_y: Optional[int] = Form(0),
     crop_w: Optional[int] = Form(0),
-    crop_h: Optional[int] = Form(0)
+    crop_h: Optional[int] = Form(0),
+    corners: Optional[str] = Form(None)
 ):
-    """Scan dokumen dengan crop"""
+    """Scan dokumen dengan crop atau 4-point perspective transform"""
 
     allowed_exts = ('.jpg', '.jpeg', '.png')
     if not file.filename.lower().endswith(allowed_exts):
         raise HTTPException(400, "File harus JPG, PNG, atau JPEG!")
 
     input_filename = f"{uuid.uuid4()}_{file.filename}"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
         buffer.write(content)
 
     output_filename = f"{uuid.uuid4()}_scanned.jpg"
-    output_path = f"outputs/{output_filename}"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    # Parsing 4 titik sudut (JSON string [[x,y], [x,y], ...])
+    corners_list = None
+    if corners:
+        try:
+            import json
+            parsed = json.loads(corners)
+            if isinstance(parsed, list) and len(parsed) == 4:
+                corners_list = [[float(p[0]), float(p[1])] for p in parsed]
+        except Exception as e:
+            print(f"Format corners tidak valid: {e}")
+            corners_list = None
 
     try:
         scan_document(
             input_path,
             output_path,
-            crop_x, crop_y, crop_w, crop_h
+            crop_x, crop_y, crop_w, crop_h,
+            corners=corners_list
         )
     except Exception as e:
         _delete_path(input_path)
@@ -710,7 +851,7 @@ async def detect_boundary_endpoint(file: UploadFile = File(...)):
         raise HTTPException(400, "File harus gambar!")
 
     input_filename = f"{uuid.uuid4()}_{file.filename}"
-    input_path = f"uploads/{input_filename}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
 
     with open(input_path, "wb") as buffer:
         content = await file.read()
@@ -728,4 +869,4 @@ async def detect_boundary_endpoint(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -744,6 +744,98 @@ def compress_image(
     except Exception as e:
         raise Exception(f"Gagal kompres gambar: {str(e)}")
 
+
+def compress_image_to_target(
+    input_path: str,
+    output_path: str,
+    target_kb: int = 1000
+):
+    """
+    Kompres gambar secara iteratif hingga ukuran file di bawah target_kb kilobyte.
+    Menggunakan binary-search pada quality dan resize bertahap.
+    Cocok untuk kebutuhan Standar Administrasi (maks. 1 MB).
+    """
+    try:
+        target_bytes = target_kb * 1024
+        image = Image.open(input_path)
+        orig_w, orig_h = image.size
+
+        if image.mode in ('RGBA', 'LA', 'P'):
+            rgb = Image.new('RGB', image.size, (255, 255, 255))
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            mask = image.split()[-1] if image.mode in ('RGBA', 'LA') else None
+            rgb.paste(image, mask=mask)
+            image = rgb
+        elif image.mode != 'RGB':
+            image = image.convert('RGB')
+
+        ext = os.path.splitext(output_path)[1].lower()
+        if ext not in ('.jpg', '.jpeg'):
+            output_path = os.path.splitext(output_path)[0] + '.jpg'
+
+        # Coba dulu tanpa resize, turunkan quality
+        for quality in [85, 75, 65, 55, 45, 35, 25]:
+            import io
+            buf = io.BytesIO()
+            image.save(buf, 'JPEG', quality=quality, optimize=True)
+            if buf.tell() <= target_bytes:
+                with open(output_path, 'wb') as f:
+                    f.write(buf.getvalue())
+                compressed_size = buf.tell()
+                original_size = os.path.getsize(input_path)
+                ratio = (1 - compressed_size / original_size) * 100 if original_size else 0
+                return {
+                    'original_size': original_size,
+                    'compressed_size': compressed_size,
+                    'ratio': round(ratio, 1),
+                    'output_path': output_path
+                }
+
+        # Jika masih belum cukup, resize bertahap
+        for scale in [0.85, 0.70, 0.55, 0.45, 0.35, 0.25]:
+            new_w = max(100, int(orig_w * scale))
+            new_h = max(100, int(orig_h * scale))
+            resized = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+            for quality in [75, 55, 35, 25]:
+                import io
+                buf = io.BytesIO()
+                resized.save(buf, 'JPEG', quality=quality, optimize=True)
+                if buf.tell() <= target_bytes:
+                    with open(output_path, 'wb') as f:
+                        f.write(buf.getvalue())
+                    compressed_size = buf.tell()
+                    original_size = os.path.getsize(input_path)
+                    ratio = (1 - compressed_size / original_size) * 100 if original_size else 0
+                    return {
+                        'original_size': original_size,
+                        'compressed_size': compressed_size,
+                        'ratio': round(ratio, 1),
+                        'output_path': output_path
+                    }
+
+        # Last resort: simpan dengan ukuran & kualitas minimum
+        import io
+        buf = io.BytesIO()
+        final = image.resize((max(100, orig_w // 4), max(100, orig_h // 4)), Image.Resampling.LANCZOS)
+        final.save(buf, 'JPEG', quality=20, optimize=True)
+        with open(output_path, 'wb') as f:
+            f.write(buf.getvalue())
+        compressed_size = buf.tell()
+        original_size = os.path.getsize(input_path)
+        ratio = (1 - compressed_size / original_size) * 100 if original_size else 0
+        return {
+            'original_size': original_size,
+            'compressed_size': compressed_size,
+            'ratio': round(ratio, 1),
+            'output_path': output_path
+        }
+
+    except Exception as e:
+        raise Exception(f"Gagal kompres gambar ke target ukuran: {str(e)}")
+
+
 # =============================================
 # PDF COMPRESSOR
 # =============================================
@@ -1213,7 +1305,7 @@ def scan_document(
         else:
             result = _auto_crop_document(img)
 
-    cv2.imwrite(output_path, result)
+    cv2.imwrite(output_path, result, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return output_path
 
 def _auto_crop_document(img):
@@ -1329,11 +1421,17 @@ def _get_yolo_model():
 
         _yolo_load_attempted = True
 
+        if os.environ.get("ENABLE_YOLO", "true").lower() == "false":
+            print("ENABLE_YOLO=false, memakai metode deteksi OpenCV.")
+            return None
+
         if not os.path.exists(YOLO_MODEL_PATH):
             print(f"Model YOLO tidak ditemukan di {YOLO_MODEL_PATH}, memakai metode OpenCV.")
             return None
 
         try:
+            import torch
+            torch.set_num_threads(1)
             from ultralytics import YOLO
             _yolo_model = YOLO(YOLO_MODEL_PATH)
             print("Model YOLO berhasil dimuat.")
@@ -1368,14 +1466,35 @@ def _detect_boundary_yolo(img):
     h, w = img.shape[:2]
     img_area = w * h
 
+    # Optimalisasi memori untuk hosting dengan RAM terbatas (Render Free 512 MB):
+    # Downscale sementara jika gambar beresolusi tinggi (misal foto kamera HP 3000x4000) ke max 1024px.
+    # YOLOv11 input tetap 640x640, sehingga presisi sama persis namun memangkas pemakaian RAM hingga 90%!
+    max_dim = 1024
+    scale = 1.0
+    if max(h, w) > max_dim:
+        scale = max_dim / float(max(h, w))
+        infer_w = int(w * scale)
+        infer_h = int(h * scale)
+        infer_img = cv2.resize(img, (infer_w, infer_h), interpolation=cv2.INTER_AREA)
+    else:
+        infer_img = img
+
     try:
-        result = model(img, conf=YOLO_CONF_THRESHOLD, verbose=False)[0]
+        import torch
+        torch.set_num_threads(1)
+        with torch.inference_mode():
+            result = model(infer_img, imgsz=640, conf=YOLO_CONF_THRESHOLD, verbose=False)[0]
     except Exception as e:
         print(f"Inferensi YOLO gagal: {e}. Memakai metode OpenCV.")
+        if infer_img is not img:
+            del infer_img
         return None
 
     boxes = result.boxes
     if boxes is None or len(boxes) == 0:
+        del result
+        if infer_img is not img:
+            del infer_img
         return None
 
     # --- Pilih deteksi dengan confidence tertinggi ---
@@ -1387,10 +1506,15 @@ def _detect_boundary_yolo(img):
     # --- Utamakan mask polygon jika model adalah segmentation ---
     if result.masks is not None and len(result.masks) > best:
         try:
-            mask_pts = result.masks.xy[best]  # (N, 2) koordinat gambar asli
+            mask_pts = result.masks.xy[best]  # (N, 2) koordinat infer_img
             if len(mask_pts) >= 4:
-                pts = mask_pts.astype(np.float32)
-                # 1. Hitung rotated minimum bounding box dari mask (selalu presisi mengikuti sudut rotasi kertas)
+                # Skala koordinat polygon mask kembali ke dimensi gambar asli
+                if scale != 1.0:
+                    pts = (mask_pts / scale).astype(np.float32)
+                else:
+                    pts = mask_pts.astype(np.float32)
+
+                # 1. Hitung rotated minimum bounding box dari mask
                 rect = cv2.minAreaRect(pts)
                 box = cv2.boxPoints(rect)
                 rect_area = cv2.contourArea(box)
@@ -1400,8 +1524,7 @@ def _detect_boundary_yolo(img):
                 peri = cv2.arcLength(hull, True)
                 approx = cv2.approxPolyDP(hull, 0.02 * peri, True)
 
-                # Jika approx 4 titik dan luasnya tidak memotong mask (>= 88% rotated rect), pakai approx (perspektif).
-                # Jika tidak, pakai rotated rect (rotasi miring murni / jajar genjang).
+                # Jika approx 4 titik dan luasnya tidak memotong mask (>= 88% rotated rect), pakai approx
                 if len(approx) == 4 and cv2.contourArea(approx) >= (rect_area * 0.88):
                     quad = approx.reshape(4, 2)
                 else:
@@ -1419,13 +1542,25 @@ def _detect_boundary_yolo(img):
 
     # Fallback ke bounding box jika mask tidak tersedia / gagal
     if x1 is None:
-        x1, y1, x2, y2 = boxes.xyxy[best].tolist()
+        raw_box = boxes.xyxy[best].tolist()
+        if scale != 1.0:
+            x1, y1, x2, y2 = [coord / scale for coord in raw_box]
+        else:
+            x1, y1, x2, y2 = raw_box
+
         corners = [
             [float(x1), float(y1)],
             [float(x2), float(y1)],
             [float(x2), float(y2)],
             [float(x1), float(y2)]
         ]
+
+    # Bersihkan memori inferensi seketika
+    del result
+    if infer_img is not img:
+        del infer_img
+    import gc
+    gc.collect()
 
     x  = max(0, int(x1))
     y  = max(0, int(y1))
@@ -1661,6 +1796,83 @@ def convert_pdf_to_markdown(input_path: str, output_path: str) -> str:
 
     return output_path
 
+
+# =============================================
+# PDF TO IMAGES CONVERTER
+# =============================================
+
+def convert_pdf_to_images(
+    input_path: str,
+    output_dir: str,
+    image_format: str = 'jpg',
+    dpi: int = 150,
+    pages: str = 'all'
+):
+    """
+    Konversi halaman PDF menjadi gambar menggunakan PyMuPDF (fitz).
+    - image_format: 'jpg' atau 'png'
+    - dpi: 150 (standar) atau 300 (kualitas cetak)
+    - pages: 'all', 'first', atau string range seperti '1-3,5'
+    Mengembalikan list path file gambar yang dihasilkan.
+    """
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(input_path)
+    total_pages = doc.page_count
+
+    # Tentukan halaman yang akan diproses
+    if pages == 'first':
+        page_indices = [0]
+    elif pages == 'all':
+        page_indices = list(range(total_pages))
+    else:
+        # Parse range seperti "1-3,5,7-9" (1-indexed)
+        page_indices = []
+        for part in pages.split(','):
+            part = part.strip()
+            if '-' in part:
+                start, end = part.split('-', 1)
+                start = max(1, int(start.strip())) - 1
+                end = min(total_pages, int(end.strip())) - 1
+                page_indices.extend(range(start, end + 1))
+            elif part.isdigit():
+                idx = int(part) - 1
+                if 0 <= idx < total_pages:
+                    page_indices.append(idx)
+        page_indices = sorted(set(page_indices))
+
+    if not page_indices:
+        raise Exception("Tidak ada halaman yang valid untuk dikonversi.")
+
+    # Hitung matrix zoom dari DPI (PDF native = 72 DPI)
+    zoom = dpi / 72.0
+    matrix = fitz.Matrix(zoom, zoom)
+
+    ext = 'jpg' if image_format.lower() in ('jpg', 'jpeg') else 'png'
+    output_paths = []
+
+    for i, page_idx in enumerate(page_indices):
+        page = doc.load_page(page_idx)
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+
+        output_filename = f"page_{page_idx + 1:04d}.{ext}"
+        output_path = os.path.join(output_dir, output_filename)
+
+        if ext == 'jpg':
+            # Simpan sebagai JPEG via PIL untuk kontrol kualitas
+            from PIL import Image as PILImage
+            import io
+            img_data = pix.tobytes("ppm")
+            pil_img = PILImage.open(io.BytesIO(img_data))
+            pil_img.save(output_path, 'JPEG', quality=92, optimize=True)
+        else:
+            pix.save(output_path)
+
+        output_paths.append(output_path)
+
+    doc.close()
+    return output_paths
+
 def convert_word_to_markdown(input_path: str, output_path: str) -> str:
     """
     Convert dokumen Word (.docx atau .doc) ke Markdown.
@@ -1728,3 +1940,80 @@ def convert_word_to_markdown(input_path: str, output_path: str) -> str:
         f.write(md_text)
 
     return output_path
+
+
+# =============================================
+# PDF TO IMAGES CONVERTER
+# =============================================
+
+def convert_pdf_to_images(
+    input_path: str,
+    output_dir: str,
+    image_format: str = 'jpg',
+    dpi: int = 150,
+    pages: str = 'all'
+):
+    """
+    Konversi halaman PDF menjadi gambar menggunakan PyMuPDF (fitz).
+    - image_format: 'jpg' atau 'png'
+    - dpi: 150 (standar) atau 300 (kualitas cetak)
+    - pages: 'all', 'first', atau string range seperti '1-3,5'
+    Mengembalikan list path file gambar yang dihasilkan.
+    """
+    import fitz  # PyMuPDF
+
+    doc = fitz.open(input_path)
+    total_pages = doc.page_count
+
+    # Tentukan halaman yang akan diproses
+    if pages == 'first':
+        page_indices = [0]
+    elif pages == 'all':
+        page_indices = list(range(total_pages))
+    else:
+        # Parse range seperti "1-3,5,7-9" (1-indexed)
+        page_indices = []
+        for part in pages.split(','):
+            part = part.strip()
+            if '-' in part:
+                start, end = part.split('-', 1)
+                start = max(1, int(start.strip())) - 1
+                end = min(total_pages, int(end.strip())) - 1
+                page_indices.extend(range(start, end + 1))
+            elif part.isdigit():
+                idx = int(part) - 1
+                if 0 <= idx < total_pages:
+                    page_indices.append(idx)
+        page_indices = sorted(set(page_indices))
+
+    if not page_indices:
+        raise Exception("Tidak ada halaman yang valid untuk dikonversi.")
+
+    # Hitung matrix zoom dari DPI (PDF native = 72 DPI)
+    zoom = dpi / 72.0
+    matrix = fitz.Matrix(zoom, zoom)
+
+    ext = 'jpg' if image_format.lower() in ('jpg', 'jpeg') else 'png'
+    output_paths = []
+
+    for i, page_idx in enumerate(page_indices):
+        page = doc.load_page(page_idx)
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+
+        output_filename = f"page_{page_idx + 1:04d}.{ext}"
+        output_path = os.path.join(output_dir, output_filename)
+
+        if ext == 'jpg':
+            # Simpan sebagai JPEG via PIL untuk kontrol kualitas
+            from PIL import Image as PILImage
+            import io
+            img_data = pix.tobytes("ppm")
+            pil_img = PILImage.open(io.BytesIO(img_data))
+            pil_img.save(output_path, 'JPEG', quality=92, optimize=True)
+        else:
+            pix.save(output_path)
+
+        output_paths.append(output_path)
+
+    doc.close()
+    return output_paths

@@ -29,6 +29,7 @@ from converter import (
     convert_images_to_pdf_with_options,
     compress_pdf,
     compress_image,
+    compress_image_to_target,
     merge_pdf_files,
     remove_watermark_auto,
     remove_camscanner_watermark,
@@ -39,7 +40,8 @@ from converter import (
     split_pdf_every_n,
     zip_files,
     convert_pdf_to_markdown,
-    convert_word_to_markdown
+    convert_word_to_markdown,
+    convert_pdf_to_images
 )
 from utils import cleanup_old_files
 
@@ -661,6 +663,62 @@ async def compress_image_endpoint(
     return response
 
 # =============================================
+# COMPRESS IMAGE TO TARGET SIZE (Standar Administrasi)
+# =============================================
+
+@app.post("/compress/image-to-target")
+async def compress_image_to_target_endpoint(
+    file: UploadFile = File(...),
+    target_kb: Optional[int] = Form(1000)
+):
+    """Kompres gambar hingga di bawah target ukuran tertentu (default 1000 KB = 1 MB)"""
+
+    allowed_exts = ('.jpg', '.jpeg', '.png', '.webp')
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in allowed_exts:
+        raise HTTPException(400, "File harus gambar (.jpg, .jpeg, .png, .webp)!")
+
+    if target_kb < 50 or target_kb > 10000:
+        raise HTTPException(400, "Target ukuran harus antara 50 KB dan 10000 KB.")
+
+    input_filename = f"{uuid.uuid4()}{ext}"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
+
+    with open(input_path, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+
+    # Output selalu JPG karena lebih hemat ukuran
+    output_filename = f"{uuid.uuid4()}_target.jpg"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+
+    try:
+        result = compress_image_to_target(
+            input_path,
+            output_path,
+            target_kb=target_kb
+        )
+        # Fungsi mungkin mengubah output_path (selalu ke .jpg)
+        actual_output = result.get('output_path', output_path)
+    except Exception as e:
+        _delete_path(input_path)
+        raise HTTPException(500, f"Kompresi ke target ukuran gagal: {str(e)}")
+
+    _delete_path(input_path)
+
+    response = FileResponse(
+        actual_output,
+        media_type='image/jpeg',
+        filename=f"admin_{os.path.splitext(file.filename)[0]}.jpg",
+        background=BackgroundTask(_delete_path, actual_output)
+    )
+    response.headers['X-Original-Size'] = str(result['original_size'])
+    response.headers['X-Compressed-Size'] = str(result['compressed_size'])
+    response.headers['X-Compression-Ratio'] = str(result['ratio'])
+
+    return response
+
+# =============================================
 # MERGE PDF & MERGE IMAGES
 # =============================================
 
@@ -843,6 +901,79 @@ async def scan_document_endpoint(
         background=BackgroundTask(_delete_path, output_path)
     )
 
+# =============================================
+# PDF TO IMAGES
+# =============================================
+
+@app.post("/convert/pdf-to-image")
+async def pdf_to_image_endpoint(
+    file: UploadFile = File(...),
+    format: Optional[str] = Form('jpg'),
+    dpi: Optional[int] = Form(150),
+    pages: Optional[str] = Form('all')
+):
+    """Konversi halaman PDF menjadi gambar (JPG/PNG). Multi-page otomatis dikemas dalam ZIP."""
+
+    if not file.filename.lower().endswith('.pdf'):
+        raise HTTPException(400, "File harus PDF!")
+
+    valid_formats = ['jpg', 'jpeg', 'png']
+    if format.lower() not in valid_formats:
+        raise HTTPException(400, "Format harus jpg atau png!")
+
+    if dpi not in [72, 96, 150, 200, 300]:
+        dpi = 150
+
+    input_filename = f"{uuid.uuid4()}.pdf"
+    input_path = os.path.join(UPLOAD_DIR, input_filename)
+
+    with open(input_path, "wb") as buffer:
+        content = await file.read()
+        buffer.write(content)
+
+    output_subdir = os.path.join(OUTPUT_DIR, f"pdf_img_{uuid.uuid4()}")
+    os.makedirs(output_subdir, exist_ok=True)
+
+    try:
+        output_paths = convert_pdf_to_images(
+            input_path,
+            output_subdir,
+            image_format=format,
+            dpi=dpi,
+            pages=pages
+        )
+    except Exception as e:
+        _delete_path(input_path)
+        _delete_path(output_subdir)
+        raise HTTPException(500, f"Konversi PDF ke gambar gagal: {str(e)}")
+
+    _delete_path(input_path)
+
+    base_name = os.path.splitext(file.filename)[0]
+
+    if len(output_paths) == 1:
+        result_path = output_paths[0]
+        ext = os.path.splitext(result_path)[1].lower()
+        media_type = 'image/jpeg' if ext in ('.jpg', '.jpeg') else 'image/png'
+        download_name = f"{base_name}_page1{ext}"
+        cleanup_paths = [output_subdir]
+        return FileResponse(
+            result_path,
+            media_type=media_type,
+            filename=download_name,
+            background=BackgroundTask(_delete_paths, *cleanup_paths)
+        )
+    else:
+        zip_path = os.path.join(OUTPUT_DIR, f"{uuid.uuid4()}_{base_name}_images.zip")
+        zip_files(output_paths, zip_path)
+        _delete_path(output_subdir)
+        return FileResponse(
+            zip_path,
+            media_type='application/zip',
+            filename=f"{base_name}_images.zip",
+            background=BackgroundTask(_delete_path, zip_path)
+        )
+
 @app.post("/detect-boundary")
 async def detect_boundary_endpoint(file: UploadFile = File(...)):
     """Deteksi boundary dokumen untuk preview"""
@@ -862,6 +993,9 @@ async def detect_boundary_endpoint(file: UploadFile = File(...)):
     except Exception as e:
         _delete_path(input_path)
         raise HTTPException(500, f"Deteksi gagal: {str(e)}")
+    finally:
+        import gc
+        gc.collect()
 
     _delete_path(input_path)
 

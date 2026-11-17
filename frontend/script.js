@@ -47,8 +47,8 @@ if (window.pdfjsLib) {
 // KATEGORI & NAVIGASI 2 TINGKAT
 // ==========================================
 const CATEGORY_TOOLS = {
-    convert: ['pdf-to-word', 'word-to-pdf', 'pdf-to-markdown', 'word-to-markdown', 'image-to-pdf', 'ppt-to-pdf', 'pdf-to-ppt', 'excel-to-pdf', 'pdf-to-excel'],
-    organize: ['merge-pdf', 'split-pdf', 'compress-pdf', 'compress-image'],
+    convert: ['pdf-to-word', 'word-to-pdf', 'pdf-to-markdown', 'word-to-markdown', 'image-to-pdf', 'pdf-to-image', 'ppt-to-pdf', 'pdf-to-ppt', 'excel-to-pdf', 'pdf-to-excel'],
+    organize: ['merge-pdf', 'split-pdf', 'compress-pdf', 'compress-image', 'compress-image-target'],
     clean: ['remove-watermark', 'scan-document']
 };
 const TOOL_CATEGORY = {};
@@ -69,6 +69,10 @@ const SINGLE_FILE_ACCEPT = {
     'pdf-to-excel': '.pdf'
 };
 
+// State untuk fitur baru
+let pdfToImageFile = null;
+let compressImageTargetFile = null;
+
 function switchCategory(cat) {
     switchTab(CATEGORY_TOOLS[cat][0]);
 }
@@ -85,11 +89,13 @@ function getActiveUploadAreaId(mode) {
         'excel-to-pdf': 'singleFileUpload',
         'pdf-to-excel': 'singleFileUpload',
         'image-to-pdf': 'multipleFileUpload',
+        'pdf-to-image': 'pdfToImageUpload',
         'compress-pdf': 'compressUpload',
         'split-pdf': 'splitUpload',
         'remove-watermark': 'watermarkUpload',
         'scan-document': 'scanUpload',
-        'compress-image': 'compressImageUpload'
+        'compress-image': 'compressImageUpload',
+        'compress-image-target': 'compressImageTargetUpload'
     };
     if (mode === 'merge-pdf') {
         return mergeMode === 'images' ? 'mergeImagesUpload' : 'mergePdfsUpload';
@@ -189,12 +195,14 @@ function switchTab(mode) {
         'pdf-to-markdown': 'PDF → Markdown (AI)',
         'word-to-markdown': 'Word → Markdown (AI)',
         'image-to-pdf': 'Image → PDF',
+        'pdf-to-image': 'PDF → Gambar',
         'ppt-to-pdf': 'PowerPoint → PDF',
         'pdf-to-ppt': 'PDF → PowerPoint',
         'excel-to-pdf': 'Excel → PDF',
         'pdf-to-excel': 'PDF → Excel',
         'compress-pdf': 'Compress PDF',
         'compress-image': 'Compress Gambar',
+        'compress-image-target': 'Standar Administrasi',
         'merge-pdf': 'Merge PDF',
         'split-pdf': 'Split PDF',
         'remove-watermark': 'Remove Watermark',
@@ -207,6 +215,8 @@ function switchTab(mode) {
     // Reset state
     selectedFiles = []; imageFiles = []; compressFile = null; watermarkFile = null; scanFile = null; splitFile = null;
     compressImageFile = null;
+    pdfToImageFile = null;
+    compressImageTargetFile = null;
     document.getElementById('singleFileInput').value = '';
     document.getElementById('multipleFileInput').value = '';
     document.getElementById('compressFileInput').value = '';
@@ -216,11 +226,15 @@ function switchTab(mode) {
     document.getElementById('scanFileInput').value = '';
     document.getElementById('splitFileInput').value = '';
     document.getElementById('compressImageFileInput').value = '';
+    document.getElementById('pdfToImageFileInput').value = '';
+    document.getElementById('compressImageTargetFileInput').value = '';
     document.getElementById('singleFileInfo').textContent = '';
     document.getElementById('compressFileInfo').textContent = '';
     document.getElementById('watermarkFileInfo').textContent = '';
     document.getElementById('splitFileInfo').textContent = '';
     document.getElementById('compressImageFileInfo').textContent = '';
+    document.getElementById('pdfToImageFileInfo').textContent = '';
+    document.getElementById('compressImageTargetFileInfo').textContent = '';
     document.getElementById('convertBtn').disabled = true;
     document.getElementById('convertBtn').style.display = 'flex';
     document.getElementById('status').className = 'status';
@@ -236,19 +250,25 @@ function switchTab(mode) {
     document.getElementById('watermarkOptions').style.display = 'none';
     document.getElementById('scanPreviewContainer').style.display = 'none';
     document.getElementById('splitOptions').style.display = 'none';
+    document.getElementById('pdfToImageOptions').style.display = 'none';
+    document.getElementById('compressImageTargetOptions').style.display = 'none';
+    document.getElementById('compressImageTargetResult').style.display = 'none';
     window.compressedImageBlob = null;
+    window.compressedTargetBlob = null;
     window.currentMarkdownText = '';
     window.currentMarkdownBlob = null;
 
     // Show/hide containers
     document.getElementById('singleFileUpload').style.display = SINGLE_FILE_MODES.includes(mode) ? 'block' : 'none';
     document.getElementById('imageToPdfContainer').style.display = mode === 'image-to-pdf' ? 'block' : 'none';
+    document.getElementById('pdfToImageContainer').style.display = mode === 'pdf-to-image' ? 'block' : 'none';
     document.getElementById('compressPdfContainer').style.display = mode === 'compress-pdf' ? 'block' : 'none';
     document.getElementById('mergePdfContainer').style.display = mode === 'merge-pdf' ? 'block' : 'none';
     document.getElementById('splitPdfContainer').style.display = mode === 'split-pdf' ? 'block' : 'none';
     document.getElementById('removeWatermarkContainer').style.display = mode === 'remove-watermark' ? 'block' : 'none';
     document.getElementById('scanContainer').style.display = mode === 'scan-document' ? 'block' : 'none';
     document.getElementById('compressImageContainer').style.display = mode === 'compress-image' ? 'block' : 'none';
+    document.getElementById('compressImageTargetContainer').style.display = mode === 'compress-image-target' ? 'block' : 'none';
     document.getElementById('imagePreviewContainer').style.display = 'none';
 
     if (SINGLE_FILE_MODES.includes(mode)) {
@@ -322,6 +342,8 @@ setupUploadAreaClick('watermarkUpload', 'watermarkFileInput');
 setupUploadAreaClick('scanUpload', 'scanFileInput');
 setupUploadAreaClick('splitUpload', 'splitFileInput');
 setupUploadAreaClick('compressImageUpload', 'compressImageFileInput');
+setupUploadAreaClick('pdfToImageUpload', 'pdfToImageFileInput');
+setupUploadAreaClick('compressImageTargetUpload', 'compressImageTargetFileInput');
 
 // ==========================================
 // DRAG & DROP
@@ -346,6 +368,8 @@ setupDragDrop(document.getElementById('watermarkUpload'), (f) => handleWatermark
 setupDragDrop(document.getElementById('scanUpload'), (f) => handleScanFile(f));
 setupDragDrop(document.getElementById('splitUpload'), (f) => handleSplitFile(f));
 setupDragDrop(document.getElementById('compressImageUpload'), (f) => handleCompressImageFile(f));
+setupDragDrop(document.getElementById('pdfToImageUpload'), (f) => handlePdfToImageFile(f));
+setupDragDrop(document.getElementById('compressImageTargetUpload'), (f) => handleCompressImageTargetFile(f));
 
 // ==========================================
 // SINGLE FILE (PDF<->Word, PPT->PDF, PDF->PPT, Excel->PDF, PDF->Excel, Markdown)
@@ -430,6 +454,71 @@ function resetCompressImage() {
     document.getElementById('convertBtn').disabled = true;
     document.getElementById('btnText').textContent = 'Convert Sekarang';
     window.compressedImageBlob = null;
+}
+
+// ==========================================
+// PDF TO IMAGE
+// ==========================================
+function handlePdfToImageFile(file) {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.pdf')) { showToast('File harus PDF!', 'error'); return; }
+    if (file.size > 50 * 1024 * 1024) { showToast('File terlalu besar! Maksimal 50MB.', 'error'); return; }
+
+    pdfToImageFile = file;
+    document.getElementById('pdfToImageFileInfo').textContent = `${file.name} (${formatFileSize(file.size)})`;
+    document.getElementById('pdfToImageOptions').style.display = 'block';
+    document.getElementById('convertBtn').disabled = false;
+    document.getElementById('btnText').textContent = 'Konversi ke Gambar';
+}
+
+document.getElementById('pdfToImagePages')?.addEventListener('change', function() {
+    document.getElementById('pdfToImageCustomRange').style.display = this.value === 'custom' ? 'block' : 'none';
+});
+
+document.getElementById('pdfToImageFileInput')?.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) handlePdfToImageFile(e.target.files[0]);
+});
+
+// ==========================================
+// COMPRESS IMAGE — STANDAR ADMINISTRASI
+// ==========================================
+function handleCompressImageTargetFile(file) {
+    if (!file) return;
+    const validExts = ['.jpg', '.jpeg', '.png', '.webp'];
+    const ext = '.' + file.name.split('.').pop().toLowerCase();
+    if (!validExts.includes(ext)) { showToast('File harus JPG, PNG, atau WEBP!', 'error'); return; }
+    if (file.size > 30 * 1024 * 1024) { showToast('File terlalu besar! Maksimal 30MB.', 'error'); return; }
+
+    compressImageTargetFile = file;
+    document.getElementById('compressImageTargetFileInfo').textContent = `${file.name} (${formatFileSize(file.size)})`;
+    document.getElementById('compressImageTargetOptions').style.display = 'block';
+    document.getElementById('compressImageTargetResult').style.display = 'none';
+    document.getElementById('convertBtn').disabled = false;
+    document.getElementById('btnText').textContent = 'Kompres ke Target';
+}
+
+document.getElementById('compressImageTargetFileInput')?.addEventListener('change', (e) => {
+    if (e.target.files.length > 0) handleCompressImageTargetFile(e.target.files[0]);
+});
+
+document.querySelectorAll('.compress-target-level-card').forEach(card => {
+    card.addEventListener('click', function() {
+        document.querySelectorAll('.compress-target-level-card').forEach(c => c.classList.remove('active'));
+        this.classList.add('active');
+        this.querySelector('input[type="radio"]').checked = true;
+        document.getElementById('customTargetInput').style.display = this.dataset.target === 'custom' ? 'block' : 'none';
+    });
+});
+
+function resetCompressImageTarget() {
+    compressImageTargetFile = null;
+    document.getElementById('compressImageTargetFileInput').value = '';
+    document.getElementById('compressImageTargetFileInfo').textContent = '';
+    document.getElementById('compressImageTargetOptions').style.display = 'none';
+    document.getElementById('compressImageTargetResult').style.display = 'none';
+    document.getElementById('convertBtn').disabled = true;
+    document.getElementById('btnText').textContent = 'Convert Sekarang';
+    window.compressedTargetBlob = null;
 }
 
 // ==========================================
@@ -1031,9 +1120,11 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
     const spinner = document.getElementById('spinner');
 
     if (currentMode === 'image-to-pdf' && !imageFiles.length) return showToast('Tidak ada gambar!', 'error');
+    if (currentMode === 'pdf-to-image' && !pdfToImageFile) return showToast('Tidak ada PDF!', 'error');
     if (SINGLE_FILE_MODES.includes(currentMode) && !selectedFiles.length) return showToast('Tidak ada file!', 'error');
     if (currentMode === 'compress-pdf' && !compressFile) return showToast('Tidak ada PDF!', 'error');
     if (currentMode === 'compress-image' && !compressImageFile) return showToast('Tidak ada gambar!', 'error');
+    if (currentMode === 'compress-image-target' && !compressImageTargetFile) return showToast('Tidak ada gambar!', 'error');
     if (currentMode === 'remove-watermark' && !watermarkFile) return showToast('Tidak ada file!', 'error');
     if (currentMode === 'scan-document' && !scanFile) return showToast('Tidak ada gambar!', 'error');
     if (currentMode === 'split-pdf') {
@@ -1073,6 +1164,29 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
     } else if (currentMode === 'compress-image') {
         formData.append('file', compressImageFile);
         formData.append('compression_level', document.querySelector('input[name="image_compression"]:checked')?.value || 'medium');
+    } else if (currentMode === 'compress-image-target') {
+        formData.append('file', compressImageTargetFile);
+        const targetCard = document.querySelector('input[name="target_size"]:checked');
+        let targetKb = 1000;
+        if (targetCard) {
+            if (targetCard.value === 'custom') {
+                targetKb = parseInt(document.getElementById('customTargetKb')?.value) || 1000;
+            } else {
+                targetKb = parseInt(targetCard.value) || 1000;
+            }
+        }
+        formData.append('target_kb', targetKb);
+    } else if (currentMode === 'pdf-to-image') {
+        formData.append('file', pdfToImageFile);
+        formData.append('format', document.getElementById('pdfToImageFormat')?.value || 'jpg');
+        formData.append('dpi', document.getElementById('pdfToImageDpi')?.value || '150');
+        const pageMode = document.getElementById('pdfToImagePages')?.value || 'all';
+        if (pageMode === 'custom') {
+            const customPages = document.getElementById('pdfToImageRangeInput')?.value.trim();
+            formData.append('pages', customPages || 'all');
+        } else {
+            formData.append('pages', pageMode);
+        }
     } else if (currentMode === 'merge-pdf') {
         if (mergeMode === 'images') {
             mergeImageFiles.forEach(img => formData.append('files', img.file));
@@ -1129,12 +1243,14 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
         'pdf-to-markdown': '/convert/pdf-to-markdown',
         'word-to-markdown': '/convert/word-to-markdown',
         'image-to-pdf': '/convert/image-to-pdf',
+        'pdf-to-image': '/convert/pdf-to-image',
         'ppt-to-pdf': '/convert/ppt-to-pdf',
         'pdf-to-ppt': '/convert/pdf-to-ppt',
         'excel-to-pdf': '/convert/excel-to-pdf',
         'pdf-to-excel': '/convert/pdf-to-excel',
         'compress-pdf': '/compress/pdf',
         'compress-image': '/compress/image',
+        'compress-image-target': '/compress/image-to-target',
         'merge-pdf': mergeMode === 'images' ? '/merge/images' : '/merge/pdf',
         'split-pdf': '/split/pdf',
         'remove-watermark': '/remove-watermark',
@@ -1168,6 +1284,17 @@ document.getElementById('convertBtn').addEventListener('click', async () => {
             document.getElementById('compressImageResult').style.display = 'block';
             window.compressedImageBlob = blob;
             showStatus('Kompresi gambar berhasil!', 'success');
+        } else if (currentMode === 'compress-image-target') {
+            const os = parseInt(response.headers.get('X-Original-Size') || compressImageTargetFile.size);
+            const cs = parseInt(response.headers.get('X-Compressed-Size') || blob.size);
+            const ratio = parseFloat(response.headers.get('X-Compression-Ratio') || ((1 - cs/os) * 100).toFixed(1));
+            document.getElementById('targetOriginalSize').textContent = formatFileSize(os);
+            document.getElementById('targetCompressedSize').textContent = formatFileSize(cs);
+            document.getElementById('targetSavedSize').textContent = `${ratio}%`;
+            document.getElementById('compressImageTargetOptions').style.display = 'none';
+            document.getElementById('compressImageTargetResult').style.display = 'block';
+            window.compressedTargetBlob = blob;
+            showStatus('Kompresi Standar Administrasi berhasil!', 'success');
         } else if (currentMode === 'pdf-to-markdown' || currentMode === 'word-to-markdown') {
             // Simpan blob untuk download ulang
             window.currentMarkdownBlob = blob;
@@ -1254,6 +1381,19 @@ document.getElementById('downloadCompressedImageBtn')?.addEventListener('click',
         const a = document.createElement('a');
         a.href = url;
         a.download = `compressed_${compressImageFile?.name || 'image.jpg'}`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+    }
+});
+
+document.getElementById('downloadCompressedTargetBtn')?.addEventListener('click', () => {
+    if (window.compressedTargetBlob) {
+        const url = URL.createObjectURL(window.compressedTargetBlob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `admin_${compressImageTargetFile?.name?.replace(/\.[^.]+$/, '') || 'dokumen'}.jpg`;
         document.body.appendChild(a);
         a.click();
         a.remove();
